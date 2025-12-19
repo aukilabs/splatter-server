@@ -583,10 +583,13 @@ impl compute_runner_api::Runner for HelloRunner {
         };
 
         ctx.output
-            .put_file(
-                upload_key.as_str(),
-                &splat_abs,
-            )
+            .put_domain_artifact(compute_runner_api::runner::DomainArtifactRequest {
+                rel_path: upload_key.as_str(),
+                name: upload_key.as_str(),
+                data_type: "splat_data",
+                existing_id: None,
+                content: compute_runner_api::runner::DomainArtifactContent::File(&splat_abs),
+            })
             .await
             .with_context(|| format!("upload {} as {}", splat_abs.display(), upload_key))?;
 
