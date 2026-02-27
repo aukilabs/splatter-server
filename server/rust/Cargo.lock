@@ -1886,6 +1886,7 @@ dependencies = [
  "axum",
  "dotenvy",
  "posemesh-compute-node",
+ "semver",
  "splatter-runner",
  "tokio",
  "tracing",

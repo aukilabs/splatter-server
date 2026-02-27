@@ -6,6 +6,8 @@ use std::path::PathBuf;
 use tracing::info;
 use tracing::warn;
 
+const SPLATTER_NODE_VERSION: &str = env!("SPLATTER_NODE_VERSION");
+
 fn tasks_cleanup_disabled() -> bool {
     match env::var("DISABLE_TASKS_CLEANUP") {
         Ok(v) => matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"),
@@ -55,7 +57,8 @@ async fn main() -> Result<()> {
         let _ = axum::serve(listener, app).await;
     });
 
-    let cfg = posemesh_compute_node::config::NodeConfig::from_env()?;
+    let mut cfg = posemesh_compute_node::config::NodeConfig::from_env()?;
+    cfg.node_version = SPLATTER_NODE_VERSION.to_string();
 
     let registry: RunnerRegistry = splatter_runner::registry();
     let capabilities = registry.capabilities();

@@ -13,3 +13,6 @@ tracing = "0.1.40"
 
 posemesh-compute-node = { version = "=0.3.1" }
 splatter-runner = { path = "../runner" }
+
+[build-dependencies]
+semver = "1"

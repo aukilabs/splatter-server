@@ -55,6 +55,8 @@ jobs:
         with:
           context: .
           file: Dockerfile
+          build-args: |
+            SPLATTER_VERSION=${{ github.ref_name }}
           push: true
           platforms: linux/amd64
           cache-from: type=gha

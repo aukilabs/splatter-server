@@ -1,7 +1,10 @@
 ##
 ## Build the Rust compute-node binary (splatter-bin)
 ##
+ARG SPLATTER_VERSION=0.0.0-local
 FROM --platform=$BUILDPLATFORM rust:1.89-bullseye AS rust-build
+ARG SPLATTER_VERSION
+ENV SPLATTER_VERSION="${SPLATTER_VERSION}"
 WORKDIR /app
 COPY server/rust/ server/rust/
 RUN cargo build --release -p splatter-bin --manifest-path server/rust/Cargo.toml
@@ -10,6 +13,9 @@ RUN cargo build --release -p splatter-bin --manifest-path server/rust/Cargo.toml
 ## Runtime image with nerfstudio + splatter runner
 ##
 FROM ghcr.io/nerfstudio-project/nerfstudio:latest
+
+ARG SPLATTER_VERSION
+ENV SPLATTER_SERVER_VERSION="${SPLATTER_VERSION}"
 
 ARG USERNAME=splatter-server
 ARG USER_UID=1000
