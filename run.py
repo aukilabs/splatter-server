@@ -197,11 +197,33 @@ if __name__ == "__main__":
         sys.exit(exit_code)
 
     logger.info("Converting Splat")
-    exit_code = run_python_script("convert_ply2splat.py", 
+    exit_code = run_python_script("convert_ply2splat.py",
                                 "--input", args.job_root_path / "refined/splatter/splat_rot.ply",
                                 "--output", args.job_root_path / "refined/splatter/splat_rot.splat")
     if exit_code != 0:
         logger.error("failed to convert splat .ply to .splat")
         sys.exit(exit_code)
-    
+
+    logger.info("Rendering Preview Images")
+    try:
+        preview_exit = run_python_script("render_previews.py",
+                                         "--ply_path", args.job_root_path / "refined/splatter/splat.ply",
+                                         "--config", args.job_root_path / "refined/splatter/splatfacto/config.yml",
+                                         "--output_dir", args.job_root_path / "refined/splatter")
+        if preview_exit != 0:
+            logger.warning("preview rendering returned non-zero exit code; continuing anyway")
+    except Exception as e:
+        logger.warning(f"preview rendering failed: {e}; continuing anyway")
+
+    logger.info("Rendering Preview Video")
+    try:
+        video_exit = run_python_script("render_preview_video.py",
+                                       "--ply_path", args.job_root_path / "refined/splatter/splat.ply",
+                                       "--config", args.job_root_path / "refined/splatter/splatfacto/config.yml",
+                                       "--output_dir", args.job_root_path / "refined/splatter")
+        if video_exit != 0:
+            logger.warning("preview video rendering returned non-zero exit code; continuing anyway")
+    except Exception as e:
+        logger.warning(f"preview video rendering failed: {e}; continuing anyway")
+
     sys.exit(exit_code)

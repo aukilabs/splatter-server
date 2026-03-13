@@ -783,9 +783,9 @@ impl compute_runner_api::Runner for HelloRunner {
 
             ctx.ctrl
                 .progress(json!({
-                    "pct": 95,
+                    "pct": 92,
                     "stage": "upload",
-                    "status": "completed",
+                    "status": "splat_uploaded",
                     "uploaded": upload_key.as_str(),
                     "splat_path": splat_abs.display().to_string(),
                 }))
@@ -795,8 +795,143 @@ impl compute_runner_api::Runner for HelloRunner {
                 .log_event(json!({
                     "level": "info",
                     "stage": "upload",
-                    "message": "output uploaded",
+                    "message": "splat output uploaded",
                     "uploaded": upload_key.as_str(),
+                }))
+                .await;
+
+            // Upload preview images (best-effort — failures are logged but do not
+            // break the pipeline).
+            let preview_suffix = refined_suffix
+                .as_deref()
+                .filter(|s| !s.is_empty())
+                .unwrap_or("");
+            let previews: &[(&str, &str, &str)] = &[
+                ("preview_top.jpg", "splat_preview_top", "refined_splat_preview_top"),
+                ("preview_angle.jpg", "splat_preview_angle", "refined_splat_preview_angle"),
+            ];
+            let mut uploaded_previews: Vec<String> = Vec::new();
+            for (file_name, data_type, name_prefix) in previews {
+                let preview_path = job_root
+                    .join("refined")
+                    .join("splatter")
+                    .join(file_name);
+                if !preview_path.exists() {
+                    warn!(
+                        file = %file_name,
+                        "preview image not found; skipping upload"
+                    );
+                    continue;
+                }
+                let preview_name = if preview_suffix.is_empty() {
+                    name_prefix.to_string()
+                } else if preview_suffix.starts_with('_') {
+                    format!("{name_prefix}{preview_suffix}")
+                } else {
+                    format!("{name_prefix}_{preview_suffix}")
+                };
+                match ctx
+                    .output
+                    .put_domain_artifact(compute_runner_api::runner::DomainArtifactRequest {
+                        rel_path: preview_name.as_str(),
+                        name: preview_name.as_str(),
+                        data_type,
+                        existing_id: None,
+                        content: compute_runner_api::runner::DomainArtifactContent::File(
+                            &preview_path,
+                        ),
+                    })
+                    .await
+                {
+                    Ok(_) => {
+                        uploaded_previews.push(preview_name.clone());
+                        info!(
+                            name = %preview_name,
+                            data_type = %data_type,
+                            path = %preview_path.display(),
+                            "preview image uploaded"
+                        );
+                    }
+                    Err(err) => {
+                        warn!(
+                            name = %preview_name,
+                            data_type = %data_type,
+                            error = %err,
+                            "failed to upload preview image; continuing"
+                        );
+                    }
+                }
+            }
+
+            // Upload preview video (best-effort).
+            let mut uploaded_preview_video: Option<String> = None;
+            {
+                let video_path = job_root
+                    .join("refined")
+                    .join("splatter")
+                    .join("preview.mp4");
+                if video_path.exists() {
+                    let video_name = if preview_suffix.is_empty() {
+                        "refined_splat_preview_video".to_string()
+                    } else if preview_suffix.starts_with('_') {
+                        format!("refined_splat_preview_video{preview_suffix}")
+                    } else {
+                        format!("refined_splat_preview_video_{preview_suffix}")
+                    };
+                    match ctx
+                        .output
+                        .put_domain_artifact(compute_runner_api::runner::DomainArtifactRequest {
+                            rel_path: video_name.as_str(),
+                            name: video_name.as_str(),
+                            data_type: "splat_preview_video",
+                            existing_id: None,
+                            content: compute_runner_api::runner::DomainArtifactContent::File(
+                                &video_path,
+                            ),
+                        })
+                        .await
+                    {
+                        Ok(_) => {
+                            uploaded_preview_video = Some(video_name.clone());
+                            info!(
+                                name = %video_name,
+                                data_type = "splat_preview_video",
+                                path = %video_path.display(),
+                                "preview video uploaded"
+                            );
+                        }
+                        Err(err) => {
+                            warn!(
+                                name = %video_name,
+                                error = %err,
+                                "failed to upload preview video; continuing"
+                            );
+                        }
+                    }
+                } else {
+                    warn!("preview video not found; skipping upload");
+                }
+            }
+
+            ctx.ctrl
+                .progress(json!({
+                    "pct": 95,
+                    "stage": "upload",
+                    "status": "completed",
+                    "uploaded_splat": upload_key.as_str(),
+                    "uploaded_previews": uploaded_previews,
+                    "uploaded_preview_video": uploaded_preview_video,
+                }))
+                .await?;
+            let _ = ctx
+                .ctrl
+                .log_event(json!({
+                    "level": "info",
+                    "stage": "upload",
+                    "message": "all outputs uploaded",
+                    "uploaded_splat": upload_key.as_str(),
+                    "uploaded_previews": uploaded_previews,
+                    "uploaded_preview_video": uploaded_preview_video,
                 }))
                 .await;
             ctx.ctrl
@@ -804,6 +939,9 @@ impl compute_runner_api::Runner for HelloRunner {
                     "progress": 100,
                     "stage": "complete",
                     "status": "succeeded",
+                    "uploaded_splat": upload_key.as_str(),
+                    "uploaded_previews": uploaded_previews,
+                    "uploaded_preview_video": uploaded_preview_video,
                 }))
                 .await?;
 
