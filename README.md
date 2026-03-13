@@ -62,7 +62,24 @@ python3 run.py \
 │   └── splatter
 │       ├── splat.ply
 │       ├── splat_rot.ply
-│       ├── splat_rot.splat # this is what needs to be uploaded to dmt
+│       ├── splat_rot.splat    # uploaded as "splat_data"
+│       ├── preview_top.jpg    # top-down preview, uploaded as "splat_preview_top"
+│       ├── preview_angle.jpg  # angled 3/4-view preview, uploaded as "splat_preview_angle"
 │       └── splatfacto
 │           └── {splat torch model}
 ```
+
+### Preview Images
+
+After training completes, two preview images are rendered from the trained
+Gaussian Splat model (best-effort -- if rendering fails the pipeline still
+succeeds):
+
+| File | View | Description |
+|------|------|-------------|
+| `preview_top.jpg` | Top-down | Camera directly above the centroid looking straight down. Shows the spatial footprint / floor-plan layout. |
+| `preview_angle.jpg` | Angled 3/4 | Camera at an elevated corner (~45 deg) looking at the centroid. Shows depth and vertical structure. |
+
+Both previews are uploaded to the domain alongside the `.splat` file so
+downstream services can quickly assess training quality without loading the
+full splat.
