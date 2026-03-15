@@ -805,13 +805,21 @@ impl compute_runner_api::Runner for HelloRunner {
                 .await;
 
             let preview_specs = [
-                ("preview_top.jpg", "refined_splat_preview_top", "splat_preview_top"),
+                (
+                    "preview_top.jpg",
+                    "refined_splat_preview_top",
+                    "splat_preview_top",
+                ),
                 (
                     "preview_angle.jpg",
                     "refined_splat_preview_angle",
                     "splat_preview_angle",
                 ),
-                ("preview.mp4", "refined_splat_preview_video", "splat_preview_video"),
+                (
+                    "preview.mp4",
+                    "refined_splat_preview_video",
+                    "splat_preview_video",
+                ),
             ];
             ensure_task_not_cancelled(&ctx, "before preview upload").await?;
             for (filename, key_base, data_type) in preview_specs {
