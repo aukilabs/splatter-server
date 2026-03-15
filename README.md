@@ -1,7 +1,7 @@
 # Splatter Node
 This repository contains the splatter node, part of the Auki Network. This node enables photorealistic scene rendering by training 3D Gaussian Splats.
 
-The splatter node operates in conjunction with the [reconstruction node](https://github.com/aukilabs/reconstruction-server) and the scans from the Domain Management Tool (DMT) app ([App Store](https://apps.apple.com/app/domain-management-tool/id6499270503) 🔗). The refined camera poses from the reconstruction node are used as a starting point for training the gaussian splat, making it more robust to challenging indoor environments and noisy captures.
+The splatter node operates in conjunction with the [reconstruction node](https://github.com/aukilabs/reconstruction-server) and the scans from the Domain Management Tool (DMT) app ([App Store](https://apps.apple.com/app/domain-management-tool/id6499270503) 馃敆). The refined camera poses from the reconstruction node are used as a starting point for training the gaussian splat, making it more robust to challenging indoor environments and noisy captures.
 
 For more information about the reconstruction and rendering pipeline, please refer to our [whitepaper](https://auki.gitbook.io/whitepaper/technical-overview/the-reconstruction-service).
 
@@ -27,3 +27,16 @@ This project builds upon the work of many excellent open-source projects, includ
 We thank their authors and contributors for making this work possible.  
 Please note that all third-party code and libraries are subject to their respective licenses, copyrights, and trademarks.
 We are not affiliated with, endorsed by, or sponsored by any of the projects or organizations mentioned above.
+
+## Output Artifacts
+The pipeline outputs the following artifacts under `refined/splatter`:
+- `splat.ply`
+- `splat_rot.ply`
+- `splat_rot.splat` (uploaded to DMT)
+- `preview_top.jpg`
+- `preview_angle.jpg`
+- `preview.mp4`
+- `camera_paths/preview_top.json`
+- `camera_paths/preview_angle.json`
+- `camera_paths/preview_video.json`
+- `splatfacto/` (splat model)

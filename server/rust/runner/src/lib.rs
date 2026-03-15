@@ -748,18 +748,22 @@ impl compute_runner_api::Runner for HelloRunner {
                 return Err(anyhow!("expected output missing: {}", splat_abs.display()));
             }
 
-            let upload_key = if let Some(suffix) =
-                refined_suffix.as_deref().filter(|s| !s.is_empty())
-            {
-                if suffix.starts_with('_') {
-                    format!("refined_splat{suffix}")
-                } else {
-                    format!("refined_splat_{suffix}")
-                }
-            } else {
+            let suffix = refined_suffix.as_deref().filter(|s| !s.is_empty());
+            if suffix.is_none() {
                 warn!("refined manifest suffix missing; uploading as splat_data without timestamp");
-                "refined_splat".to_string()
+            }
+            let build_upload_key = |base: &str| -> String {
+                if let Some(suffix) = suffix {
+                    if suffix.starts_with('_') {
+                        format!("{base}{suffix}")
+                    } else {
+                        format!("{base}_{suffix}")
+                    }
+                } else {
+                    base.to_string()
+                }
             };
+            let upload_key = build_upload_key("refined_splat");
 
             ctx.ctrl
                 .progress(json!({
@@ -799,6 +803,79 @@ impl compute_runner_api::Runner for HelloRunner {
                     "uploaded": upload_key.as_str(),
                 }))
                 .await;
+
+            let preview_specs = [
+                ("preview_top.jpg", "refined_splat_preview_top", "splat_preview_top"),
+                (
+                    "preview_angle.jpg",
+                    "refined_splat_preview_angle",
+                    "splat_preview_angle",
+                ),
+                ("preview.mp4", "refined_splat_preview_video", "splat_preview_video"),
+            ];
+            ensure_task_not_cancelled(&ctx, "before preview upload").await?;
+            for (filename, key_base, data_type) in preview_specs {
+                let rel_path = PathBuf::from("refined").join("splatter").join(filename);
+                let abs_path = job_root.join(&rel_path);
+                if !abs_path.exists() {
+                    let _ = ctx
+                        .ctrl
+                        .log_event(json!({
+                            "level": "info",
+                            "stage": "upload",
+                            "message": "preview missing; skipping upload",
+                            "file": abs_path.display().to_string(),
+                            "data_type": data_type,
+                        }))
+                        .await;
+                    continue;
+                }
+                let upload_name = build_upload_key(key_base);
+                let upload_result = ctx
+                    .output
+                    .put_domain_artifact(compute_runner_api::runner::DomainArtifactRequest {
+                        rel_path: upload_name.as_str(),
+                        name: upload_name.as_str(),
+                        data_type,
+                        existing_id: None,
+                        content: compute_runner_api::runner::DomainArtifactContent::File(&abs_path),
+                    })
+                    .await;
+                match upload_result {
+                    Ok(_) => {
+                        let _ = ctx
+                            .ctrl
+                            .log_event(json!({
+                                "level": "info",
+                                "stage": "upload",
+                                "message": "preview uploaded",
+                                "uploaded": upload_name.as_str(),
+                                "file": abs_path.display().to_string(),
+                                "data_type": data_type,
+                            }))
+                            .await;
+                    }
+                    Err(err) => {
+                        warn!(
+                            %err,
+                            file = %abs_path.display(),
+                            data_type = %data_type,
+                            "preview upload failed"
+                        );
+                        let _ = ctx
+                            .ctrl
+                            .log_event(json!({
+                                "level": "warn",
+                                "stage": "upload",
+                                "message": "preview upload failed",
+                                "error": err.to_string(),
+                                "file": abs_path.display().to_string(),
+                                "data_type": data_type,
+                            }))
+                            .await;
+                    }
+                }
+            }
             ctx.ctrl
                 .progress(json!({
                     "progress": 100,

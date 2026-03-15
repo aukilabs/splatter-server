@@ -24,7 +24,7 @@ ARG DEBIAN_FRONTEND=noninteractive
 ENV TASKS_ROOT=/app/tasks
 
 # Keep the original Python dependency footprint
-RUN python3 -m pip install --no-cache-dir ply2splat
+RUN python3 -m pip install --no-cache-dir ply2splat plyfile
 
 WORKDIR /app
 
