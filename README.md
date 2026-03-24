@@ -62,7 +62,38 @@ python3 run.py \
 │   └── splatter
 │       ├── splat.ply
 │       ├── splat_rot.ply
-│       ├── splat_rot.splat # this is what needs to be uploaded to dmt
+│       ├── splat_rot.splat    # uploaded as "splat_data"
+│       ├── preview_top.jpg    # top-down preview, uploaded as "splat_preview_top"
+│       ├── preview_angle.jpg  # angled 3/4-view preview, uploaded as "splat_preview_angle"
+│       ├── preview.mp4        # orbital preview video, uploaded as "splat_preview_video"
 │       └── splatfacto
 │           └── {splat torch model}
 ```
+
+### Preview Images
+
+After training completes, two preview images are rendered from the trained
+Gaussian Splat model (best-effort -- if rendering fails the pipeline still
+succeeds):
+
+| File | View | Description |
+|------|------|-------------|
+| `preview_top.jpg` | Top-down | Camera directly above the centroid looking straight down. Shows the spatial footprint / floor-plan layout. |
+| `preview_angle.jpg` | Angled 3/4 | Camera at an elevated corner (~45 deg) looking at the centroid. Shows depth and vertical structure. |
+
+Both previews are uploaded to the domain alongside the `.splat` file so
+downstream services can quickly assess training quality without loading the
+full splat.
+
+### Preview Video
+
+After training completes, a short preview video is rendered from the trained
+Gaussian Splat model (best-effort -- if rendering fails the pipeline still
+succeeds):
+
+| File | Description |
+|------|-------------|
+| `preview.mp4` | 5-10 second orbital camera path (~270 deg arc at ~45 deg elevation) around the scene centroid at 30 fps. Encoded as H.264 MP4 with `yuv420p` pixel format and `-movflags +faststart` for web-friendly streaming. |
+
+The preview video is rendered using `ns-render camera-path` and encoded with
+`ffmpeg`. It is uploaded to the domain as a `splat_preview_video` artifact.
