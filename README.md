@@ -66,3 +66,12 @@ python3 run.py \
 │       └── splatfacto
 │           └── {splat torch model}
 ```
+
+### Preview Images
+
+The pipeline can optionally generate two preview images of the trained Gaussian Splat:
+
+- **preview_top.png**: Top-down view showing the spatial footprint/floor-plan layout
+- **preview_angle.png**: Angled ¾-view showing depth and vertical structure
+
+These are best-effort and may not render if the training fails or GPU is unavailable.

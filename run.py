@@ -203,5 +203,16 @@ if __name__ == "__main__":
     if exit_code != 0:
         logger.error("failed to convert splat .ply to .splat")
         sys.exit(exit_code)
+
+    # Render preview images (best-effort, don't fail the job if this fails)
+    logger.info("Rendering Preview Images (optional)")
+    exit_code = run_python_script("render_previews.py",
+                                   "--splat_ply", args.job_root_path / "refined/splatter/splat.ply",
+                                   "--config", args.job_root_path / "refined/splatter/splatfacto/config.yml",
+                                   "--output_dir", args.job_root_path / "refined/splatter",
+                                   "--output_top", args.job_root_path / "refined/splatter/preview_top.png",
+                                   "--output_angle", args.job_root_path / "refined/splatter/preview_angle.png")
+    if exit_code != 0:
+        logger.warning("failed to render preview images (non-critical, continuing)")
     
     sys.exit(exit_code)
