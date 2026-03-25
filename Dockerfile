@@ -78,7 +78,8 @@ WORKDIR /app
 RUN git clone https://github.com/microsoft/vcpkg.git
 RUN cd vcpkg && ./bootstrap-vcpkg.sh -disableMetrics
 RUN git clone --recursive https://github.com/MrNeRF/LichtFeld-Studio
-RUN cd LichtFeld-Studio && git checkout tags/v0.4.2 && git submodule update --init --recursive
+#RUN cd LichtFeld-Studio && git checkout tags/v0.4.2 && git submodule update --init --recursive
+RUN cd LichtFeld-Studio && git submodule update --init --recursive
 RUN cd LichtFeld-Studio && \
     cmake -B build -DCMAKE_BUILD_TYPE=Release -G Ninja \
     -DCMAKE_TOOLCHAIN_FILE=/app/vcpkg/scripts/buildsystems/vcpkg.cmake \
