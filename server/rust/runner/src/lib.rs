@@ -600,9 +600,6 @@ impl compute_runner_api::Runner for SplatterRunner {
             .parent()
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("."));
-        let legacy_run_py = env::var_os("SPLATTER_RUN_PY")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| exe_dir.join("run.py"));
         let pipeline_py = PathBuf::from("splatter_pipeline.py");
         let project_root = pipeline_py
             .parent()
@@ -614,23 +611,7 @@ impl compute_runner_api::Runner for SplatterRunner {
                     .unwrap_or_else(|| PathBuf::from("/app"))
             });
 
-        let use_legacy_colmap = mode == CapabilityMode::ColmapV1
-            && (bool_env("SPLATTER_USE_LEGACY_COLMAP_RUN_PY", false)
-                || !bool_env("SPLATTER_ENABLE_LICHTFELD_COLMAP", true));
-
-        let mut cmd_args: Vec<String> = if use_legacy_colmap {
-            vec![
-                legacy_run_py.display().to_string(),
-                "--domain_id".to_string(),
-                domain_id_str.clone(),
-                "--job_id".to_string(),
-                job_id_str.clone(),
-                "--job_root_path".to_string(),
-                job_root.display().to_string(),
-                "--log_level".to_string(),
-                "info".to_string(),
-            ]
-        } else {
+        let mut cmd_args: Vec<String> = {
             let mode_name = match mode {
                 CapabilityMode::ColmapV1 => "colmap_v1_single_splat",
                 CapabilityMode::LocalV1 => "local_only",
@@ -671,14 +652,13 @@ impl compute_runner_api::Runner for SplatterRunner {
             args
         };
 
-            ctx.ctrl
-                .progress(json!({
-                    "status": "running_python",
-                    "job_root_path": job_root,
-                    "script": if use_legacy_colmap { legacy_run_py.display().to_string() } else { pipeline_py.display().to_string() },
-                    "capability": self.capability
-                }))
-                .await?;
+        ctx.ctrl
+            .progress(json!({
+                "status": "running_python",
+                "job_root_path": job_root,
+                "capability": self.capability
+            }))
+            .await?;
 
         let full_cmd: Vec<String> = std::iter::once("python".to_string())
             .chain(cmd_args.iter().cloned())

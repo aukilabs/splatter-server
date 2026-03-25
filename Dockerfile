@@ -111,8 +111,6 @@ ENV TASKS_ROOT=/app/tasks
 ENV LICHTFELD_BIN=/app/LichtFeld-Studio/build/LichtFeld-Studio
 ENV LICHTFELD_CONFIG=/app/config/lichtfeld_optimization_params.json
 ENV LICHTFELD_CONFIG_VDA=/app/config/lichtfeld_optimization_params_vda.json
-ENV SPLATTER_ENABLE_LICHTFELD_COLMAP=true
-ENV SPLATTER_USE_LEGACY_COLMAP_RUN_PY=false
 
 # Install sudo for runtime elevated permissions if needed
 RUN apt-get update && apt-get install -y sudo && rm -rf /var/lib/apt/lists/*
