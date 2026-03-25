@@ -116,7 +116,8 @@ Here are some common issues you may encounter, with suggested fixes:
 - **Symptom:** The Docker container is using the wrong GPU, for example the integrated GPU instead of the discrete GPU.
 - **Fixes:**
   - Check your system activity to see which GPU is being used.
-  - Specify the correct GPU in the Docker run command using the `--gpus` flag
+  - Run `nvidia-smi -L` to list all GPUs on your system.
+  - Run the container with the correct GPU index specified in the `--gpus` flag, for example `docker run --gpus '"device=0"' ...`.
 
 ### Container killed or crashes under load
 - **Symptom:** Server stops or computer restarts during job processing
