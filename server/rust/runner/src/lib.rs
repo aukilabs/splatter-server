@@ -738,12 +738,16 @@ impl compute_runner_api::Runner for HelloRunner {
                 }))
                 .await;
 
-            // Upload splat_rot.splat if it exists.
+            // Upload outputs: SOG (compressed) first, then .splat (lossless backup).
             ensure_task_not_cancelled(&ctx, "before upload").await?;
-            let splat_rel = PathBuf::from("refined")
+            let splat_abs = job_root
+                .join("refined")
                 .join("splatter")
                 .join("splat_rot.splat");
-            let splat_abs = job_root.join(&splat_rel);
+            let sog_abs = job_root
+                .join("refined")
+                .join("splatter")
+                .join("splat_rot.sog");
             if !splat_abs.exists() {
                 return Err(anyhow!("expected output missing: {}", splat_abs.display()));
             }
@@ -761,15 +765,61 @@ impl compute_runner_api::Runner for HelloRunner {
                 "refined_splat".to_string()
             };
 
+            let sog_upload_key =
+                if let Some(suffix) = refined_suffix.as_deref().filter(|s| !s.is_empty()) {
+                    if suffix.starts_with('_') {
+                        format!("refined_splat_sog{suffix}")
+                    } else {
+                        format!("refined_splat_sog_{suffix}")
+                    }
+                } else {
+                    "refined_splat_sog".to_string()
+                };
+
             ctx.ctrl
                 .progress(json!({
-                    "pct": 90,
+                    "pct": 85,
                     "stage": "upload",
                     "status": "starting",
-                    "artifact": upload_key.as_str(),
                 }))
                 .await?;
 
+            // Upload SOG first (smaller file, viewer can start loading sooner).
+            if sog_abs.exists() {
+                ensure_task_not_cancelled(&ctx, "uploading sog").await?;
+                match ctx
+                    .output
+                    .put_domain_artifact(compute_runner_api::runner::DomainArtifactRequest {
+                        rel_path: sog_upload_key.as_str(),
+                        name: sog_upload_key.as_str(),
+                        data_type: "splat_data_sog",
+                        existing_id: None,
+                        content: compute_runner_api::runner::DomainArtifactContent::File(&sog_abs),
+                    })
+                    .await
+                {
+                    Ok(_) => {
+                        info!(artifact = %sog_upload_key, "uploaded SOG compressed splat");
+                        let _ = ctx
+                            .ctrl
+                            .log_event(json!({
+                                "level": "info",
+                                "stage": "upload",
+                                "message": "SOG compressed splat uploaded",
+                                "uploaded": sog_upload_key.as_str(),
+                            }))
+                            .await;
+                    }
+                    Err(err) => {
+                        warn!(error = %err, "failed to upload SOG; falling back to .splat only");
+                    }
+                }
+            } else {
+                info!("SOG file not found; skipping compressed upload");
+            }
+
+            // Upload lossless .splat as backup.
+            ensure_task_not_cancelled(&ctx, "uploading splat").await?;
             ctx.output
                 .put_domain_artifact(compute_runner_api::runner::DomainArtifactRequest {
                     rel_path: upload_key.as_str(),
@@ -786,8 +836,8 @@ impl compute_runner_api::Runner for HelloRunner {
                     "pct": 95,
                     "stage": "upload",
                     "status": "completed",
-                    "uploaded": upload_key.as_str(),
-                    "splat_path": splat_abs.display().to_string(),
+                    "uploaded_sog": sog_abs.exists(),
+                    "uploaded_splat": upload_key.as_str(),
                 }))
                 .await?;
             let _ = ctx
