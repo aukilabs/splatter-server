@@ -58,7 +58,7 @@ After the existing upload block, add SOG upload logic:
 #### `Dockerfile`
 Add `3dgsconverter` to the pip install line:
 ```dockerfile
-RUN python3 -m pip install --no-cache-dir ply2splat 3dgsconverter
+RUN python3 -m pip install --no-cache-dir ply2splat git+https://github.com/francescofugazzi/3dgsconverter.git@0.8
 ```
 
 Also copy the new `compress_sog.py` script:

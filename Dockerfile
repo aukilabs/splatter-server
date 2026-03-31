@@ -24,7 +24,7 @@ ARG DEBIAN_FRONTEND=noninteractive
 ENV TASKS_ROOT=/app/tasks
 
 # Keep the original Python dependency footprint
-RUN python3 -m pip install --no-cache-dir ply2splat 3dgsconverter
+RUN python3 -m pip install --no-cache-dir ply2splat git+https://github.com/francescofugazzi/3dgsconverter.git@0.8
 
 WORKDIR /app
 

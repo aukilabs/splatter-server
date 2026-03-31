@@ -47,7 +47,7 @@ def compress_to_sog(input_path, output_path):
         return 0
 
     except FileNotFoundError:
-        print("3dgsconverter not found. Install with: pip install 3dgsconverter", file=sys.stderr)
+        print("3dgsconverter not found. Install with: pip install git+https://github.com/francescofugazzi/3dgsconverter.git@0.8", file=sys.stderr)
         return 1
     except Exception as e:
         print(f"SOG compression error: {e}", file=sys.stderr)
