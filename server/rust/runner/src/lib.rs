@@ -79,7 +79,6 @@ impl compute_runner_api::Runner for HelloRunner {
         );
         let _span_guard = task_span.enter();
 
-        let token = ctx.access_token.get();
         let client_id =
             std::env::var("POSEMESH_CLIENT_ID").unwrap_or_else(|_| "splatter-runner".into());
         let mut refined_suffix: Option<String> = None;
@@ -225,6 +224,7 @@ impl compute_runner_api::Runner for HelloRunner {
                             name: None,
                             data_type: None,
                         };
+                        let token = ctx.access_token.get();
                         match download_metadata_v1(
                             &domain_base,
                             &client_id,
@@ -269,6 +269,7 @@ impl compute_runner_api::Runner for HelloRunner {
                                     } else {
                                         folder_name
                                     };
+                                    let token = ctx.access_token.get();
                                     match download_by_id(
                                         &domain_base,
                                         &client_id,
@@ -338,6 +339,7 @@ impl compute_runner_api::Runner for HelloRunner {
                                 name: Some(recording_name.clone()),
                                 data_type: Some("dmt_recording_mp4".to_string()),
                             };
+                            let token = ctx.access_token.get();
                             match download_metadata_v1(
                                 &domain_base,
                                 &client_id,
@@ -356,6 +358,7 @@ impl compute_runner_api::Runner for HelloRunner {
                                             "downloading derived recording",
                                         )
                                         .await?;
+                                        let token = ctx.access_token.get();
                                         match download_by_id(
                                             &domain_base,
                                             &client_id,
@@ -421,6 +424,7 @@ impl compute_runner_api::Runner for HelloRunner {
                                 name: Some(expected_name.clone()),
                                 data_type: None,
                             };
+                            let token = ctx.access_token.get();
                             match download_metadata_v1(
                                 &domain_base,
                                 &client_id,
@@ -470,6 +474,7 @@ impl compute_runner_api::Runner for HelloRunner {
                                 {
                                     ensure_task_not_cancelled(&ctx, "downloading colmap binary")
                                         .await?;
+                                    let token = ctx.access_token.get();
                                     match download_by_id(
                                         &domain_base,
                                         &client_id,
