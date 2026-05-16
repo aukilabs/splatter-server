@@ -10,6 +10,15 @@ For more information about the reconstruction and rendering pipeline, please ref
 - [Deployment](docs/deployment.md)
 - [Contributing](CONTRIBUTING.md)
 
+## Output Files
+
+After training completes, the following files are generated and uploaded to the domain:
+
+- **splat_rot.splat** - Final Gaussian Splat binary file (data_type: "splat_data")
+- **preview_top.jpg** - Top-down preview image showing spatial footprint (data_type: "splat_preview_top")
+- **preview_angle.jpg** - Angled preview image showing 3D structure (data_type: "splat_preview_angle")
+- **preview.mp4** - Orbital preview video for complete scene overview (data_type: "splat_preview_video")
+
 ## License
 
 This project is licensed under the [MIT License](LICENSE).

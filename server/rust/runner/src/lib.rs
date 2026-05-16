@@ -786,6 +786,101 @@ impl compute_runner_api::Runner for HelloRunner {
                 .await
                 .with_context(|| format!("upload {} as {}", splat_abs.display(), upload_key))?;
 
+            // Upload preview images if they exist
+            let preview_top_path = job_root.join("refined").join("splatter").join("preview_top.jpg");
+            if preview_top_path.exists() {
+                let preview_top_key = if let Some(suffix) = refined_suffix.as_deref().filter(|s| !s.is_empty()) {
+                    if suffix.starts_with('_') {
+                        format!("refined_splat_preview_top{suffix}")
+                    } else {
+                        format!("refined_splat_preview_top_{suffix}")
+                    }
+                } else {
+                    "refined_splat_preview_top".to_string()
+                };
+                
+                match ctx.output
+                    .put_domain_artifact(compute_runner_api::runner::DomainArtifactRequest {
+                        rel_path: preview_top_key.as_str(),
+                        name: preview_top_key.as_str(),
+                        data_type: "splat_preview_top",
+                        existing_id: None,
+                        content: compute_runner_api::runner::DomainArtifactContent::File(&preview_top_path),
+                    })
+                    .await
+                {
+                    Ok(_) => {
+                        info!("uploaded preview_top: {}", preview_top_key);
+                    }
+                    Err(err) => {
+                        warn!("failed to upload preview_top: {}", err);
+                    }
+                }
+            }
+
+            let preview_angle_path = job_root.join("refined").join("splatter").join("preview_angle.jpg");
+            if preview_angle_path.exists() {
+                let preview_angle_key = if let Some(suffix) = refined_suffix.as_deref().filter(|s| !s.is_empty()) {
+                    if suffix.starts_with('_') {
+                        format!("refined_splat_preview_angle{suffix}")
+                    } else {
+                        format!("refined_splat_preview_angle_{suffix}")
+                    }
+                } else {
+                    "refined_splat_preview_angle".to_string()
+                };
+                
+                match ctx.output
+                    .put_domain_artifact(compute_runner_api::runner::DomainArtifactRequest {
+                        rel_path: preview_angle_key.as_str(),
+                        name: preview_angle_key.as_str(),
+                        data_type: "splat_preview_angle",
+                        existing_id: None,
+                        content: compute_runner_api::runner::DomainArtifactContent::File(&preview_angle_path),
+                    })
+                    .await
+                {
+                    Ok(_) => {
+                        info!("uploaded preview_angle: {}", preview_angle_key);
+                    }
+                    Err(err) => {
+                        warn!("failed to upload preview_angle: {}", err);
+                    }
+                }
+            }
+
+            // Upload preview video if it exists
+            let preview_video_path = job_root.join("refined").join("splatter").join("preview.mp4");
+            if preview_video_path.exists() {
+                let preview_video_key = if let Some(suffix) = refined_suffix.as_deref().filter(|s| !s.is_empty()) {
+                    if suffix.starts_with('_') {
+                        format!("refined_splat_preview_video{suffix}")
+                    } else {
+                        format!("refined_splat_preview_video_{suffix}")
+                    }
+                } else {
+                    "refined_splat_preview_video".to_string()
+                };
+                
+                match ctx.output
+                    .put_domain_artifact(compute_runner_api::runner::DomainArtifactRequest {
+                        rel_path: preview_video_key.as_str(),
+                        name: preview_video_key.as_str(),
+                        data_type: "splat_preview_video",
+                        existing_id: None,
+                        content: compute_runner_api::runner::DomainArtifactContent::File(&preview_video_path),
+                    })
+                    .await
+                {
+                    Ok(_) => {
+                        info!("uploaded preview_video: {}", preview_video_key);
+                    }
+                    Err(err) => {
+                        warn!("failed to upload preview_video: {}", err);
+                    }
+                }
+            }
+
             ctx.ctrl
                 .progress(json!({
                     "pct": 95,

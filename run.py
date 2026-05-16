@@ -203,5 +203,34 @@ if __name__ == "__main__":
     if exit_code != 0:
         logger.error("failed to convert splat .ply to .splat")
         sys.exit(exit_code)
+
+    # Generate preview images (best effort - don't fail the job if this fails)
+    logger.info("Generating Preview Images")
+    try:
+        exit_code = run_python_script("generate_preview_images.py",
+                                    "--config", args.job_root_path / "refined/splatter/splatfacto/config.yml",
+                                    "--ply", args.job_root_path / "refined/splatter/splat.ply",
+                                    "--output", args.job_root_path / "refined/splatter")
+        if exit_code == 0:
+            logger.info("Preview images generated successfully")
+        else:
+            logger.warning("Preview image generation failed, continuing anyway")
+    except Exception as e:
+        logger.warning(f"Preview image generation failed: {e}, continuing anyway")
+
+    # Generate preview video (best effort - don't fail the job if this fails)
+    logger.info("Generating Preview Video")
+    try:
+        exit_code = run_python_script("generate_preview_video.py",
+                                    "--config", args.job_root_path / "refined/splatter/splatfacto/config.yml",
+                                    "--ply", args.job_root_path / "refined/splatter/splat.ply",
+                                    "--output", args.job_root_path / "refined/splatter",
+                                    "--frames", "180")
+        if exit_code == 0:
+            logger.info("Preview video generated successfully")
+        else:
+            logger.warning("Preview video generation failed, continuing anyway")
+    except Exception as e:
+        logger.warning(f"Preview video generation failed: {e}, continuing anyway")
     
-    sys.exit(exit_code)
+    sys.exit(0)
