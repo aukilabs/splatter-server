@@ -8,6 +8,7 @@ The splatter node has fairly high requirements as the training of a realistic ga
 - **CPU:** 4 cores
 - **RAM:** 12 GiB (recommended 16 GiB or more)
 - **GPU:** Nvidia with 8+ GiB VRAM. Tested on RTX 3090, RTX 4060 and T4. RTX 50xx is not currently supported, but planned for upcoming releases. May work on older Nvidia cards too with enough VRAM and recent CUDA.
+`Note: RTX 50xx is not currently supported`
 - **NVIDIA driver:** Recent driver with CUDA 11.8 support.
 - **Disk space:** 40 GB or more
 - **Docker** _- Windows support tested with Docker Desktop and WSL 2_
