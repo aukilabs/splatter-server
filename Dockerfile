@@ -24,12 +24,15 @@ ARG DEBIAN_FRONTEND=noninteractive
 ENV TASKS_ROOT=/app/tasks
 
 # Keep the original Python dependency footprint
-RUN python3 -m pip install --no-cache-dir ply2splat
+RUN python3 -m pip install --no-cache-dir ply2splat plyfile
+
+# Install ffmpeg for video encoding
+RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
 # Job pipeline scripts (run.py drives ns-process-data / ns-train)
-COPY run.py extract_mp4.py convert_ply2splat.py rotate_ply.py /app/
+COPY run.py extract_mp4.py convert_ply2splat.py rotate_ply.py generate_preview_images.py generate_preview_video.py /app/
 
 # Compute node binary built from source
 COPY --from=rust-build /app/server/rust/target/release/splatter-bin /app/compute-node
