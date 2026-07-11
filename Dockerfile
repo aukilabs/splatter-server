@@ -24,12 +24,12 @@ ARG DEBIAN_FRONTEND=noninteractive
 ENV TASKS_ROOT=/app/tasks
 
 # Keep the original Python dependency footprint
-RUN python3 -m pip install --no-cache-dir ply2splat
+RUN python3 -m pip install --no-cache-dir ply2splat git+https://github.com/francescofugazzi/3dgsconverter.git@0.8
 
 WORKDIR /app
 
 # Job pipeline scripts (run.py drives ns-process-data / ns-train)
-COPY run.py extract_mp4.py convert_ply2splat.py rotate_ply.py /app/
+COPY run.py extract_mp4.py convert_ply2splat.py rotate_ply.py compress_sog.py /app/
 
 # Compute node binary built from source
 COPY --from=rust-build /app/server/rust/target/release/splatter-bin /app/compute-node

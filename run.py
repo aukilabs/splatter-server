@@ -197,11 +197,18 @@ if __name__ == "__main__":
         sys.exit(exit_code)
 
     logger.info("Converting Splat")
-    exit_code = run_python_script("convert_ply2splat.py", 
+    exit_code = run_python_script("convert_ply2splat.py",
                                 "--input", args.job_root_path / "refined/splatter/splat_rot.ply",
                                 "--output", args.job_root_path / "refined/splatter/splat_rot.splat")
     if exit_code != 0:
         logger.error("failed to convert splat .ply to .splat")
         sys.exit(exit_code)
-    
+
+    logger.info("Compressing Splat to SOG")
+    sog_exit_code = run_python_script("compress_sog.py",
+                                "--input", args.job_root_path / "refined/splatter/splat_rot.ply",
+                                "--output", args.job_root_path / "refined/splatter/splat_rot.sog")
+    if sog_exit_code != 0:
+        logger.warning("SOG compression failed; .splat file is still available")
+
     sys.exit(exit_code)
