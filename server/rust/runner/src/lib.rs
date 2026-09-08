@@ -7,6 +7,7 @@ use posemesh_domain_http::domain_data::{download_by_id, download_metadata_v1, Do
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::env;
+use std::future::Future;
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::Instant;
@@ -59,6 +60,30 @@ async fn ensure_task_not_cancelled(
 fn is_task_cancelled_error(err: &anyhow::Error) -> bool {
     err.chain()
         .any(|cause| cause.to_string().contains(TASK_CANCELLED_PREFIX))
+}
+
+async fn record_preview_upload<F, T, E>(
+    uploaded_previews: &mut Vec<String>,
+    name: &str,
+    upload: F,
+) -> std::result::Result<T, E>
+where
+    F: Future<Output = std::result::Result<T, E>>,
+{
+    let result = upload.await;
+    if result.is_ok() {
+        uploaded_previews.push(name.to_string());
+    }
+    result
+}
+
+fn completed_progress(uploaded_previews: &[String]) -> Value {
+    json!({
+        "progress": 100,
+        "stage": "complete",
+        "status": "succeeded",
+        "preview_artifacts": uploaded_previews,
+    })
 }
 
 #[async_trait]
@@ -753,18 +778,22 @@ impl compute_runner_api::Runner for HelloRunner {
                 return Err(anyhow!("expected output missing: {}", splat_abs.display()));
             }
 
-            let upload_key = if let Some(suffix) =
-                refined_suffix.as_deref().filter(|s| !s.is_empty())
-            {
-                if suffix.starts_with('_') {
-                    format!("refined_splat{suffix}")
-                } else {
-                    format!("refined_splat_{suffix}")
-                }
-            } else {
+            let suffix = refined_suffix.as_deref().filter(|s| !s.is_empty());
+            if suffix.is_none() {
                 warn!("refined manifest suffix missing; uploading as splat_data without timestamp");
-                "refined_splat".to_string()
+            }
+            let build_upload_key = |base: &str| -> String {
+                if let Some(suffix) = suffix {
+                    if suffix.starts_with('_') {
+                        format!("{base}{suffix}")
+                    } else {
+                        format!("{base}_{suffix}")
+                    }
+                } else {
+                    base.to_string()
+                }
             };
+            let upload_key = build_upload_key("refined_splat");
 
             ctx.ctrl
                 .progress(json!({
@@ -804,12 +833,96 @@ impl compute_runner_api::Runner for HelloRunner {
                     "uploaded": upload_key.as_str(),
                 }))
                 .await;
+
+            let preview_specs = [
+                (
+                    "preview_top.jpg",
+                    "refined_splat_preview_top",
+                    "splat_preview_top",
+                ),
+                (
+                    "preview_angle.jpg",
+                    "refined_splat_preview_angle",
+                    "splat_preview_angle",
+                ),
+                (
+                    "preview.mp4",
+                    "refined_splat_preview_video",
+                    "splat_preview_video",
+                ),
+            ];
+            ensure_task_not_cancelled(&ctx, "before preview upload").await?;
+            let mut uploaded_previews = Vec::new();
+            for (filename, key_base, data_type) in preview_specs {
+                let rel_path = PathBuf::from("refined").join("splatter").join(filename);
+                let abs_path = job_root.join(&rel_path);
+                if !abs_path.exists() {
+                    let _ = ctx
+                        .ctrl
+                        .log_event(json!({
+                            "level": "info",
+                            "stage": "upload",
+                            "message": "preview missing; skipping upload",
+                            "file": abs_path.display().to_string(),
+                            "data_type": data_type,
+                        }))
+                        .await;
+                    continue;
+                }
+                let upload_name = build_upload_key(key_base);
+                let upload_result = record_preview_upload(
+                    &mut uploaded_previews,
+                    &upload_name,
+                    ctx.output.put_domain_artifact(
+                        compute_runner_api::runner::DomainArtifactRequest {
+                            rel_path: upload_name.as_str(),
+                            name: upload_name.as_str(),
+                            data_type,
+                            existing_id: None,
+                            content: compute_runner_api::runner::DomainArtifactContent::File(
+                                &abs_path,
+                            ),
+                        },
+                    ),
+                )
+                .await;
+                match upload_result {
+                    Ok(_) => {
+                        let _ = ctx
+                            .ctrl
+                            .log_event(json!({
+                                "level": "info",
+                                "stage": "upload",
+                                "message": "preview uploaded",
+                                "uploaded": upload_name.as_str(),
+                                "file": abs_path.display().to_string(),
+                                "data_type": data_type,
+                            }))
+                            .await;
+                    }
+                    Err(err) => {
+                        warn!(
+                            %err,
+                            file = %abs_path.display(),
+                            data_type = %data_type,
+                            "preview upload failed"
+                        );
+                        let _ = ctx
+                            .ctrl
+                            .log_event(json!({
+                                "level": "warn",
+                                "stage": "upload",
+                                "message": "preview upload failed",
+                                "error": err.to_string(),
+                                "file": abs_path.display().to_string(),
+                                "data_type": data_type,
+                            }))
+                            .await;
+                    }
+                }
+            }
             ctx.ctrl
-                .progress(json!({
-                    "progress": 100,
-                    "stage": "complete",
-                    "status": "succeeded",
-                }))
+                .progress(completed_progress(&uploaded_previews))
                 .await?;
 
             Ok(())
@@ -858,5 +971,69 @@ impl compute_runner_api::Runner for HelloRunner {
         }
 
         task_result
+    }
+}
+
+#[cfg(test)]
+mod preview_progress_tests {
+    use super::{completed_progress, record_preview_upload};
+    use serde_json::json;
+
+    #[tokio::test]
+    async fn completion_reports_only_successful_uploads_and_preserves_results() {
+        let mut previews = Vec::new();
+        let first = record_preview_upload(
+            &mut previews,
+            "refined_splat_preview_top_2026-09-08",
+            async { Ok::<_, &str>("top-artifact-id") },
+        )
+        .await;
+        let failed = record_preview_upload(
+            &mut previews,
+            "refined_splat_preview_angle_2026-09-08",
+            async { Err::<(), _>("upload unavailable") },
+        )
+        .await;
+        let last = record_preview_upload(
+            &mut previews,
+            "refined_splat_preview_video_2026-09-08",
+            async { Ok::<_, &str>("video-artifact-id") },
+        )
+        .await;
+
+        assert_eq!(first, Ok("top-artifact-id"));
+        assert_eq!(failed, Err("upload unavailable"));
+        assert_eq!(last, Ok("video-artifact-id"));
+        assert_eq!(
+            completed_progress(&previews),
+            json!({
+                "progress": 100,
+                "stage": "complete",
+                "status": "succeeded",
+                "preview_artifacts": [
+                    "refined_splat_preview_top_2026-09-08",
+                    "refined_splat_preview_video_2026-09-08"
+                ],
+            }),
+        );
+    }
+
+    #[tokio::test]
+    async fn optional_preview_failures_keep_successful_completion_with_empty_artifacts() {
+        let mut previews = Vec::new();
+        assert_eq!(
+            completed_progress(&previews)["preview_artifacts"],
+            json!([])
+        );
+        let failed = record_preview_upload(&mut previews, "failed-preview", async {
+            Err::<(), _>("upload unavailable")
+        })
+        .await;
+        assert_eq!(failed, Err("upload unavailable"));
+        assert_eq!(
+            completed_progress(&previews)["preview_artifacts"],
+            json!([])
+        );
+        assert_eq!(completed_progress(&previews)["status"], "succeeded");
     }
 }

@@ -6,6 +6,8 @@ import sys
 import os
 import time
 import json
+import math
+import shutil
 from pathlib import Path
 
 logger = logging.getLogger("splatter-node")
@@ -129,6 +131,257 @@ def run_cmd(cmd: list):
         logger.exception(f"Unexpected error while running script: {e}")
         return 1
 
+def _normalize(vec):
+    norm = math.sqrt(sum(v * v for v in vec))
+    if norm <= 1e-8:
+        return [0.0, 0.0, 0.0]
+    return [v / norm for v in vec]
+
+def _dot(a, b):
+    return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+
+def _cross(a, b):
+    return [
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+    ]
+
+def _view_matrix(eye, target, up_hint):
+    # Nerfstudio uses OpenGL camera-to-world poses: +Z points backwards,
+    # so the viewing direction toward the target is -Z.
+    lookat = [eye[i] - target[i] for i in range(3)]
+    vec2 = _normalize(lookat)
+    up = up_hint[:]
+    if abs(_dot(vec2, up)) > 0.99:
+        up = [0.0, 1.0, 0.0]
+        if abs(_dot(vec2, up)) > 0.99:
+            up = [1.0, 0.0, 0.0]
+    vec0 = _normalize(_cross(up, vec2))
+    vec1 = _normalize(_cross(vec2, vec0))
+    mat = [
+        [vec0[0], vec1[0], vec2[0], eye[0]],
+        [vec0[1], vec1[1], vec2[1], eye[1]],
+        [vec0[2], vec1[2], vec2[2], eye[2]],
+        [0.0, 0.0, 0.0, 1.0],
+    ]
+    return mat
+
+def _flatten_matrix(mat):
+    return [mat[r][c] for r in range(4) for c in range(4)]
+
+def _load_ply_bounds(ply_path: Path):
+    try:
+        from plyfile import PlyData
+        import numpy as np
+    except Exception as exc:
+        logger.warning(f"preview render skipped: missing plyfile/numpy ({exc})")
+        return None
+
+    if not ply_path.exists():
+        logger.warning(f"preview render skipped: missing ply file {ply_path}")
+        return None
+
+    try:
+        ply = PlyData.read(str(ply_path))
+        verts = ply["vertex"]
+        xs = np.asarray(verts["x"], dtype=float)
+        ys = np.asarray(verts["y"], dtype=float)
+        zs = np.asarray(verts["z"], dtype=float)
+        min_x, max_x = float(xs.min()), float(xs.max())
+        min_y, max_y = float(ys.min()), float(ys.max())
+        min_z, max_z = float(zs.min()), float(zs.max())
+    except Exception as exc:
+        logger.warning(f"preview render skipped: failed to read ply ({exc})")
+        return None
+
+    center = [
+        (min_x + max_x) / 2.0,
+        (min_y + max_y) / 2.0,
+        (min_z + max_z) / 2.0,
+    ]
+    span = [
+        max_x - min_x,
+        max_y - min_y,
+        max_z - min_z,
+    ]
+    size = max(span + [1.0])
+    return center, size
+
+def _write_camera_path(path: Path, camera_path_entries, render_width, render_height, seconds, fps):
+    payload = {
+        "camera_type": "perspective",
+        "render_height": float(render_height),
+        "render_width": float(render_width),
+        "seconds": float(seconds),
+        "fps": float(fps),
+        "is_cycle": False,
+        "smoothness_value": 0.0,
+        "camera_path": camera_path_entries,
+    }
+    path.write_text(json.dumps(payload, indent=2))
+
+def _render_previews(job_root_path: Path):
+    preview_dir = job_root_path / "refined" / "splatter"
+    # The runner uploads these fixed names. A retry must not publish previews
+    # left by an earlier run when this render is skipped or fails.
+    for filename in ("preview_top.jpg", "preview_angle.jpg", "preview.mp4", "preview.rendering.mp4"):
+        (preview_dir / filename).unlink(missing_ok=True)
+    video_frames_dir = preview_dir / "preview_video_frames"
+    shutil.rmtree(video_frames_dir, ignore_errors=True)
+    config_path = preview_dir / "splatfacto" / "config.yml"
+    if not config_path.exists():
+        logger.warning(f"preview render skipped: missing config {config_path}")
+        return
+
+    if shutil.which("ns-render") is None:
+        logger.warning("preview render skipped: ns-render not found")
+        return
+    ffmpeg_available = shutil.which("ffmpeg") is not None
+    if not ffmpeg_available:
+        logger.warning("preview video skipped: ffmpeg not found")
+
+    ply_path = preview_dir / "splat.ply"
+    bounds = _load_ply_bounds(ply_path)
+    if bounds is None:
+        return
+
+    center, size = bounds
+    render_width = 1280
+    render_height = 720
+    aspect = render_width / render_height
+    fov = 60.0
+    up = [0.0, 0.0, 1.0]
+
+    camera_paths_dir = preview_dir / "camera_paths"
+    camera_paths_dir.mkdir(parents=True, exist_ok=True)
+
+    def build_entry(eye, target, render_time):
+        mat = _view_matrix(eye, target, up)
+        return {
+            "camera_to_world": _flatten_matrix(mat),
+            "fov": fov,
+            "aspect": aspect,
+            "render_time": float(render_time),
+        }
+
+    def render_still(name, entry):
+        staging_dir = preview_dir / name
+        try:
+            # A successful renderer exit without a new frame must never reuse
+            # a JPEG left in the staging directory by an earlier attempt.
+            if staging_dir.exists():
+                shutil.rmtree(staging_dir)
+            camera_json = camera_paths_dir / f"{name}.json"
+            _write_camera_path(camera_json, [entry], render_width, render_height, seconds=1.0, fps=1.0)
+            exit_code = run_script(
+                "ns-render",
+                "camera-path",
+                "--load-config",
+                config_path,
+                "--camera-path-filename",
+                camera_json,
+                "--output-path",
+                staging_dir,
+                "--output-format",
+                "images",
+                "--image-format",
+                "jpeg",
+                "--jpeg-quality",
+                "90",
+            )
+            image = staging_dir / "00000.jpg"
+            if exit_code != 0:
+                logger.warning(f"preview render failed: {name}")
+            elif image.is_file() and image.stat().st_size > 0:
+                # Both paths are on the job filesystem: rename publishes the
+                # complete rendered image atomically, without a partial copy.
+                image.replace(preview_dir / f"{name}.jpg")
+            else:
+                logger.warning(f"preview render skipped: missing or empty {name} image")
+        except Exception as exc:
+            logger.warning(f"preview render failed: {name} ({exc})")
+        finally:
+            shutil.rmtree(staging_dir, ignore_errors=True)
+
+    # Top-down preview image
+    top_eye = [center[0], center[1], center[2] + size * 1.5]
+    render_still("preview_top", build_entry(top_eye, center, 0.0))
+
+    # Angled preview image
+    angle_eye = [
+        center[0] + size * 1.2,
+        center[1] + size * 1.2,
+        center[2] + size * 1.2 * math.sqrt(2.0),
+    ]
+    render_still("preview_angle", build_entry(angle_eye, center, 0.0))
+
+    # Preview video
+    if ffmpeg_available:
+        frames = 150
+        seconds = 5.0
+        orbit_entries = []
+        radius = size * 1.5
+        height = radius * math.tan(math.radians(35.0))
+        for i in range(frames):
+            theta = 2.0 * math.pi * (i / frames)
+            eye = [
+                center[0] + radius * math.cos(theta),
+                center[1] + radius * math.sin(theta),
+                center[2] + height,
+            ]
+            render_time = (i / max(1, frames - 1)) * seconds
+            orbit_entries.append(build_entry(eye, center, render_time))
+
+        video_json = camera_paths_dir / "preview_video.json"
+        _write_camera_path(video_json, orbit_entries, render_width, render_height, seconds=seconds, fps=30.0)
+        preview_video = preview_dir / "preview.mp4"
+        rendering_video = preview_dir / "preview.rendering.mp4"
+        try:
+            # Lossless frames avoid a second lossy encode and let us set the
+            # browser-compatible codec, pixel format and fast-start metadata.
+            exit_code = run_script(
+                "ns-render",
+                "camera-path",
+                "--load-config",
+                config_path,
+                "--camera-path-filename",
+                video_json,
+                "--output-path",
+                video_frames_dir,
+                "--output-format",
+                "images",
+                "--image-format",
+                "png",
+            )
+            if exit_code != 0:
+                logger.warning("preview render failed: video")
+                return
+            if not all((video_frames_dir / f"{i:05d}.png").is_file() for i in range(frames)):
+                logger.warning("preview video skipped: incomplete rendered frame sequence")
+                return
+            exit_code = run_script(
+                "ffmpeg",
+                "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
+                "-framerate", str(frames / seconds),
+                "-start_number", "0",
+                "-i", video_frames_dir / "%05d.png",
+                "-frames:v", str(frames),
+                "-c:v", "libx264",
+                "-pix_fmt", "yuv420p",
+                "-crf", "23",
+                "-movflags", "+faststart",
+                "-an",
+                rendering_video,
+            )
+            if exit_code == 0 and rendering_video.is_file() and rendering_video.stat().st_size > 0:
+                rendering_video.replace(preview_video)
+            else:
+                logger.warning("preview encoding failed: video")
+        finally:
+            rendering_video.unlink(missing_ok=True)
+            shutil.rmtree(video_frames_dir, ignore_errors=True)
+
 # Example usage
 if __name__ == "__main__":
 
@@ -187,6 +440,12 @@ if __name__ == "__main__":
     if exit_code != 0:
         logger.error("failed to export gaussian splat")
         sys.exit(exit_code)
+
+    logger.info("Rendering Previews")
+    try:
+        _render_previews(args.job_root_path)
+    except Exception as exc:
+        logger.warning(f"preview render failed: {exc}")
 
     logger.info("Rotating Splat")
     exit_code = run_python_script("rotate_ply.py", 
