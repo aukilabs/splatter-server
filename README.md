@@ -10,6 +10,45 @@ For more information about the reconstruction and rendering pipeline, please ref
 - [Deployment](docs/deployment.md)
 - [Contributing](CONTRIBUTING.md)
 
+## Output Files
+
+After training, the node exports the splat and attempts to render two images and
+a five-second orbital video from the trained model. Preview files are written
+under `{job_root_path}/refined/splatter/`:
+
+| File | View | Domain data type | Uploaded name |
+| --- | --- | --- | --- |
+| `splat_rot.splat` | Trained scene | `splat_data` | `refined_splat{suffix}` |
+| `preview_top.jpg` | Top-down view | `splat_preview_top` | `refined_splat_preview_top{suffix}` |
+| `preview_angle.jpg` | Elevated 45-degree corner view | `splat_preview_angle` | `refined_splat_preview_angle{suffix}` |
+| `preview.mp4` | 360-degree orbit at 35-degree elevation | `splat_preview_video` | `refined_splat_preview_video{suffix}` |
+
+The names use the refined manifest's existing suffix, adding a separating
+underscore when needed. Without a suffix, the base names are used. The MP4 uses
+H.264 at 30 fps, with browser-compatible pixel format and fast-start metadata.
+Temporary rendered video frames are removed after encoding.
+
+The final progress event lists the names of previews that were successfully
+uploaded, for example:
+
+```json
+{
+  "progress": 100,
+  "stage": "complete",
+  "status": "succeeded",
+  "preview_artifacts": [
+    "refined_splat_preview_top_2026-09-08_12-34-56",
+    "refined_splat_preview_angle_2026-09-08_12-34-56",
+    "refined_splat_preview_video_2026-09-08_12-34-56"
+  ]
+}
+```
+
+Previews are optional: rendering or uploading a preview logs a warning on
+failure and allows the main splat job to complete. Failed or skipped previews
+are omitted from `preview_artifacts`; the list is empty if none upload. The
+Docker runtime includes the PLY reader and FFmpeg required by this step.
+
 ## License
 
 This project is licensed under the [MIT License](LICENSE).
@@ -23,6 +62,9 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for how to report issues, open PRs, and r
 This project builds upon the work of many excellent open-source projects, including
 [nerfstudio](https://github.com/nerfstudio-project/nerfstudio), [ply2splat](https://github.com/bastikohn/ply2splat), [PyTorch](https://pytorch.org),
 [OpenCV](https://opencv.org), [Open3D](https://www.open3d.org), and others.
+
+Preview generation and artifact upload build on
+[Justin Lee Yang's contribution](https://github.com/aukilabs/splatter-server/pull/16).
 
 We thank their authors and contributors for making this work possible.  
 Please note that all third-party code and libraries are subject to their respective licenses, copyrights, and trademarks.

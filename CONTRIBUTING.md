@@ -66,7 +66,16 @@ python3 run.py \
 │   └── splatter
 │       ├── splat.ply
 │       ├── splat_rot.ply
-│       ├── splat_rot.splat # this is what needs to be uploaded to dmt
+│       ├── splat_rot.splat # uploaded as splat_data
+│       ├── preview_top.jpg # optional, uploaded as splat_preview_top
+│       ├── preview_angle.jpg # optional, uploaded as splat_preview_angle
+│       ├── preview.mp4 # optional, uploaded as splat_preview_video
 │       └── splatfacto
 │           └── {splat torch model}
 ```
+
+See [Output Files](README.md#output-files) for preview naming and completion
+metadata. CPU-only preview contract checks run from the repository root with
+`python3 -m unittest discover -s tests -v`. These checks supplement the Rust
+checks and do not replace a real GPU rendering job or domain upload/download
+verification.

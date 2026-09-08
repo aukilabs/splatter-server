@@ -24,7 +24,12 @@ ARG DEBIAN_FRONTEND=noninteractive
 ENV TASKS_ROOT=/app/tasks
 
 # Keep the original Python dependency footprint
-RUN python3 -m pip install --no-cache-dir ply2splat
+RUN python3 -m pip install --no-cache-dir ply2splat plyfile
+
+# Required by ns-render when encoding the orbital preview video.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
