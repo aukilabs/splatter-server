@@ -54,7 +54,6 @@ RUN apt-get update && \
         xorg-dev \
         libglu1-mesa-dev \
         libglib2.0-0 \
-        libgtk-3-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # LichtFeld needs CMake 3.30+
@@ -81,6 +80,8 @@ RUN git clone https://github.com/microsoft/vcpkg.git
 RUN cd vcpkg && ./bootstrap-vcpkg.sh -disableMetrics
 RUN git clone --recursive https://github.com/MrNeRF/LichtFeld-Studio
 RUN cd LichtFeld-Studio && git checkout "${LICHTFELD_GIT_REF}" && git submodule update --init --recursive
+# Latest LichtFeld NFD GTK backend needs libgtk-3-dev at configure time
+RUN apt-get update && apt-get install -y --no-install-recommends libgtk-3-dev && rm -rf /var/lib/apt/lists/*
 RUN cd LichtFeld-Studio && \
     cmake -B build -DCMAKE_BUILD_TYPE=Release -G Ninja \
     -DCMAKE_TOOLCHAIN_FILE=/app/vcpkg/scripts/buildsystems/vcpkg.cmake \
