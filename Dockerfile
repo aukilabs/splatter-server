@@ -74,12 +74,12 @@ RUN update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-14 60 && \
 
 WORKDIR /app
 
-# Build LichtFeld Studio
+# Build LichtFeld Studio (pin to R2-capable master; helper script vendored separately)
+ARG LICHTFELD_GIT_REF=8fe40cf2190c070e6e0cbea03851b8fa8d02f32c
 RUN git clone https://github.com/microsoft/vcpkg.git
 RUN cd vcpkg && ./bootstrap-vcpkg.sh -disableMetrics
 RUN git clone --recursive https://github.com/MrNeRF/LichtFeld-Studio
-#RUN cd LichtFeld-Studio && git checkout tags/v0.4.2 && git submodule update --init --recursive
-RUN cd LichtFeld-Studio && git submodule update --init --recursive
+RUN cd LichtFeld-Studio && git checkout "${LICHTFELD_GIT_REF}" && git submodule update --init --recursive
 RUN cd LichtFeld-Studio && \
     cmake -B build -DCMAKE_BUILD_TYPE=Release -G Ninja \
     -DCMAKE_TOOLCHAIN_FILE=/app/vcpkg/scripts/buildsystems/vcpkg.cmake \
@@ -98,6 +98,10 @@ RUN python -m pip install --no-cache-dir --upgrade pip && \
 # Pipeline code
 COPY splatter_pipeline.py artifact_naming.py local_main.py global_main.py combine_splats.py convert_splat.py filter_splats.py preprocessing.py partition_splat.py /app/
 
+# R2 train helper (vendored; not yet on upstream default branch)
+COPY scripts/train_helper.sh /app/scripts/train_helper.sh
+RUN chmod +x /app/scripts/train_helper.sh
+
 # LichtFeld config params
 COPY config/lichtfeld_optimization_params.json config/lichtfeld_optimization_params_vda.json /app/config/
 
@@ -110,6 +114,9 @@ COPY --from=rust-build /app/server/rust/target/release/splatter-bin /app/splatte
 # Runtime configuration
 ENV TASKS_ROOT=/app/tasks
 ENV LICHTFELD_BIN=/app/LichtFeld-Studio/build/LichtFeld-Studio
+ENV LFS_EXE=/app/LichtFeld-Studio/build/LichtFeld-Studio
+ENV LICHTFELD_TRAIN_HELPER=/app/scripts/train_helper.sh
+ENV LFS_ROOT=/app/LichtFeld-Studio
 ENV LICHTFELD_CONFIG=/app/config/lichtfeld_optimization_params.json
 ENV LICHTFELD_CONFIG_VDA=/app/config/lichtfeld_optimization_params_vda.json
 
@@ -123,6 +130,12 @@ RUN mkdir -p /app/tasks \
 # Add $USER_UID as a user with sudo privileges (without password)
 RUN useradd -u "$USER_UID" -o -m user || true \
     && echo "user ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers
+
+# MoGe-2 weights for preprocess (same release URL as LichtFeld preprocess.cpp)
+ARG MOGE_MODEL_URL=https://github.com/MrNeRF/LichtFeld-Studio/releases/download/model-moge2-v1/moge-2-vitb-normal.lfw
+RUN mkdir -p /home/user/.lichtfeld/onnx \
+    && curl -fsSL -o /home/user/.lichtfeld/onnx/moge-2-vitb-normal.lfw "${MOGE_MODEL_URL}" \
+    && chown -R "$USER_UID:$USER_GID" /home/user/.lichtfeld
 
 USER $USER_UID:$USER_GID
 

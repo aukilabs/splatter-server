@@ -142,6 +142,18 @@ fn bool_env(name: &str, default: bool) -> bool {
     }
 }
 
+fn splatter_iterations() -> String {
+    env::var("SPLATTER_ITERATIONS").unwrap_or_else(|_| "20000".to_string())
+}
+
+fn convert_to_sog_default(mode: CapabilityMode) -> bool {
+    matches!(mode, CapabilityMode::GlobalV1)
+}
+
+fn convert_to_splat_default(mode: CapabilityMode) -> bool {
+    !matches!(mode, CapabilityMode::GlobalV1)
+}
+
 /// Extract (domain_server_base, domain_id) from a full data CID URL.
 fn parse_domain_from_cid(cid: &str) -> Option<(String, String)> {
     // Expect form: https://domain-server/api/v1/domains/{domain_id}/data/{data_id}
@@ -624,7 +636,7 @@ impl compute_runner_api::Runner for SplatterRunner {
                 "--job_root_path".to_string(),
                 job_root.display().to_string(),
                 "--iterations".to_string(),
-                env::var("SPLATTER_ITERATIONS").unwrap_or_else(|_| "20000".to_string()),
+                splatter_iterations(),
             ];
             if bool_env("SPLATTER_ENABLE_SPARSITY", false) {
                 args.push("--enable_sparsity".to_string());
@@ -636,10 +648,10 @@ impl compute_runner_api::Runner for SplatterRunner {
                 args.push("--scan_ids".to_string());
                 args.push(summary.scan_ids.join(","));
             }
-            if bool_env("SPLATTER_CONVERT_TO_SOG", false) {
+            if bool_env("SPLATTER_CONVERT_TO_SOG", convert_to_sog_default(mode)) {
                 args.push("--convert_to_sog".to_string());
             }
-            if !bool_env("SPLATTER_CONVERT_TO_SPLAT", true) {
+            if !bool_env("SPLATTER_CONVERT_TO_SPLAT", convert_to_splat_default(mode)) {
                 args.push("--no_convert_to_splat".to_string());
             } else {
                 args.push("--convert_to_splat".to_string());
@@ -985,12 +997,13 @@ async fn materialize_inputs_for_mode(
             CapabilityMode::GlobalV1 => {
                 if data_type == "local_splat_ply" || m.name.starts_with("local_splat_ply_") {
                     let scan_id = normalize_scan_id(m.name.trim_start_matches("local_splat_ply_"));
+                    let ply_name = format!("splat_{}.filtered.ply", splatter_iterations());
                     let dest = job_root
                         .join("refined")
                         .join("local")
                         .join(&scan_id)
                         .join("splat")
-                        .join("splat.filtered.ply");
+                        .join(ply_name);
                     let bytes = download_to(domain_base, client_id, token, &m.domain_id, &m.id, &dest).await?;
                     let dataset_dir = job_root.join("datasets").join(&scan_id);
                     tokio::fs::create_dir_all(&dataset_dir).await?;

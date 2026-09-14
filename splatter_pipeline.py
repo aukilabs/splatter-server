@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import os
 import shutil
+import sys
 import zipfile
 from pathlib import Path
 
@@ -161,7 +162,8 @@ def run_colmap_single_splat(job_root: Path, iterations: int, enable_sparsity: bo
         iterations=iterations,
         enable_sparsity=enable_sparsity,
         sparsify_steps=sparsify_steps,
-        init_ply=None
+        init_ply=None,
+        use_train_helper=False,
     )
 
     _progress("filtering", 85, "filtering gaussians")
@@ -240,11 +242,11 @@ def run_local_only(
 
     _progress("postprocessing", 90, "staging outputs")
     output_dir = job_root / "output"
-    total_iters = iterations + (15000 if enable_sparsity else 0)
+    # Local R2 helper ignores sparsity; artifact names use iterations only.
     produced = []
     for scan_id in scan_ids:
         splat_dir = job_root / "refined" / "local" / scan_id / "splat"
-        base = f"splat_{total_iters}.filtered"
+        base = f"splat_{iterations}.filtered"
         if convert_to_splat:
             splat_file = splat_dir / f"{base}.splat"
             if splat_file.exists():
@@ -269,6 +271,7 @@ def run_local_only(
 def run_global_only(
     job_root: Path,
     scan_ids: list[str],
+    iterations: int,
     use_filtered: bool,
     partition: bool,
     partition_size: float,
@@ -284,7 +287,7 @@ def run_global_only(
     result = global_main.main(
         job_root=job_root,
         scan_ids=scan_ids,
-        base_filename="splat",
+        base_filename=f"splat_{iterations}",
         sparsify_steps=0,
         use_filtered=use_filtered,
         do_partition=partition,
@@ -353,15 +356,25 @@ def main() -> None:
     else:
         use_filtered = args.use_filtered and not args.no_use_filtered
         do_partition = args.partition and not args.no_partition
-        convert_to_splat = args.convert_to_splat and not args.no_convert_to_splat
+        convert_flags = {
+            f for f in sys.argv
+            if f in {"--convert_to_sog", "--convert_to_splat", "--no_convert_to_splat"}
+        }
+        if convert_flags:
+            convert_to_splat = args.convert_to_splat and not args.no_convert_to_splat
+            convert_to_sog = args.convert_to_sog
+        else:
+            convert_to_sog = _bool_env("SPLATTER_CONVERT_TO_SOG", True)
+            convert_to_splat = _bool_env("SPLATTER_CONVERT_TO_SPLAT", False)
         run_global_only(
             job_root=job_root,
             scan_ids=scan_ids,
+            iterations=args.iterations,
             use_filtered=use_filtered,
             partition=do_partition,
             partition_size=args.partition_size,
             convert_to_splat=convert_to_splat,
-            convert_to_sog=args.convert_to_sog,
+            convert_to_sog=convert_to_sog,
         )
 
 

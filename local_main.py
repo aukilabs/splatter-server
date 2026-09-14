@@ -14,6 +14,9 @@ import open3d as o3d
 from preprocessing import run_bundle_adjustment, set_colmap_points_from_pointcloud, cleanup_rec_cameras
 
 LICHTFELD_BIN = os.environ.get("LICHTFELD_BIN", "/app/LichtFeld-Studio/build/LichtFeld-Studio")
+LICHTFELD_TRAIN_HELPER = os.environ.get(
+    "LICHTFELD_TRAIN_HELPER", "/app/scripts/train_helper.sh"
+)
 LICHTFELD_CONFIG = os.environ.get("LICHTFELD_CONFIG", "config/lichtfeld_optimization_params.json")
 LICHTFELD_CONFIG_VDA = os.environ.get("LICHTFELD_CONFIG_VDA", "config/lichtfeld_optimization_params_vda.json")
 VDA_REPO = os.environ.get("VDA_REPO", "/app/Video-Depth-Anything")
@@ -87,13 +90,48 @@ def _stream_training_output(proc: subprocess.Popen) -> None:
             print(line, flush=True)
 
 
-def train_splat(colmap_dir: Path, output_dir: Path, images_dir: Path = None,
-                iterations: int = 20000,
-                enable_sparsity: bool = False, sparsify_steps: int = 15000,
-                init_ply: Path = None):
-    if not images_dir:
-        images_dir = colmap_dir / "images"
+def _prepare_helper_scene(colmap_dir: Path, images_dir: Path) -> Path:
+    """Map COLMAP layout to helper scene root (requires ``<scene>/images``)."""
+    colmap_dir = colmap_dir.resolve()
+    images_dir = images_dir.resolve()
 
+    # Standard undistort layout: dense/{sparse,images}
+    if (
+        colmap_dir.name == "sparse"
+        and images_dir.name == "images"
+        and colmap_dir.parent == images_dir.parent
+    ):
+        return colmap_dir.parent
+
+    scene = colmap_dir
+    if (scene / "images").exists():
+        return scene
+
+    images_link = scene / "images"
+    if not images_link.exists():
+        os.symlink(str(images_dir), str(images_link))
+    return scene
+
+
+def _run_training_cmd(cmd: list[str]) -> None:
+    print(f"Running command: {' '.join(cmd)}", flush=True)
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    _stream_training_output(proc)
+    ret = proc.wait()
+    if ret != 0:
+        raise subprocess.CalledProcessError(ret, cmd)
+
+
+def _train_splat_legacy(
+    colmap_dir: Path,
+    output_dir: Path,
+    images_dir: Path,
+    iterations: int,
+    enable_sparsity: bool,
+    sparsify_steps: int,
+    init_ply: Path | None,
+) -> None:
+    """Direct LichtFeld Studio invocation (frozen ``/splatter/colmap/v1`` path)."""
     cmd = [
         LICHTFELD_BIN,
         "-d", str(colmap_dir),
@@ -108,18 +146,56 @@ def train_splat(colmap_dir: Path, output_dir: Path, images_dir: Path = None,
 
     if enable_sparsity:
         cmd.append("--enable-sparsity")
-        cmd.append(f"--sparsify-steps")
+        cmd.append("--sparsify-steps")
         cmd.append(str(sparsify_steps))
 
     if init_ply is not None:
         cmd.extend(["--init", str(init_ply)])
-    print(f"Running command: {' '.join(cmd)}", flush=True)
 
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-    _stream_training_output(proc)
-    ret = proc.wait()
-    if ret != 0:
-        raise subprocess.CalledProcessError(ret, cmd)
+    _run_training_cmd(cmd)
+
+
+def train_splat(colmap_dir: Path, output_dir: Path, images_dir: Path = None,
+                iterations: int = 20000,
+                enable_sparsity: bool = False, sparsify_steps: int = 15000,
+                init_ply: Path = None, use_train_helper: bool = True):
+    if not images_dir:
+        images_dir = colmap_dir / "images"
+
+    if use_train_helper:
+        # R2 helper path: sparsity, VDA --init, and LICHTFELD_CONFIG* are unsupported.
+        if enable_sparsity:
+            print(
+                "[train_splat] enable_sparsity ignored on R2 helper path",
+                flush=True,
+            )
+        if init_ply is not None:
+            print(
+                "[train_splat] init_ply/--init ignored on R2 helper path",
+                flush=True,
+            )
+
+        scene_dir = _prepare_helper_scene(colmap_dir, images_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        cmd = [
+            LICHTFELD_TRAIN_HELPER,
+            "-i", str(iterations),
+            "-r", "2",
+            str(scene_dir),
+            str(output_dir),
+        ]
+        _run_training_cmd(cmd)
+        return
+
+    _train_splat_legacy(
+        colmap_dir,
+        output_dir,
+        images_dir,
+        iterations,
+        enable_sparsity,
+        sparsify_steps,
+        init_ply,
+    )
 
 def scan_main(job_root: Path, scan_id: str, iterations: int = 20000,
               enable_sparsity: bool = False, sparsify_steps: int = 15000,
@@ -128,11 +204,8 @@ def scan_main(job_root: Path, scan_id: str, iterations: int = 20000,
               bundle_adjust: bool = True) -> None:
     start_time = time.time()
 
-    total_iters = iterations
-    if enable_sparsity:
-        total_iters += sparsify_steps
-    
-    splat_filename = f"splat_{total_iters}"
+    # R2 helper outputs splat_{iterations}.ply (sparsity steps not applied).
+    splat_filename = f"splat_{iterations}"
     splat_dir = job_root / "refined" / "local" / scan_id / "splat"
     if reuse_trained and (splat_dir / f"{splat_filename}.ply").exists():
         print("Splat reuse enabled, skip ahead to filtering")

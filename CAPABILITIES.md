@@ -37,10 +37,14 @@ This document defines the runtime contract for the splatter capabilities impleme
   - Referenced domain data includes:
     - `refined_manifest_json`
     - one or more `local_splat_ply` artifacts
-- **Primary outputs**:
-  - Partition outputs mapped to:
-    - `splat_partition_<suffix>.splat_partition`
+- **Primary outputs** (SOG-only product path):
+  - Partitioned SOG artifacts only:
     - `splat_partition_sog_<suffix>.splat_partition_sog`
+  - Partitioned `.splat` files are **not** produced or uploaded on this capability.
+- **Runner defaults** (override via env):
+  - `SPLATTER_CONVERT_TO_SOG=true` (default for global; local/colmap default false)
+  - `SPLATTER_CONVERT_TO_SPLAT=false` (default for global; local/colmap default true)
+  - Local PLY handoff expects `splat_<iterations>.filtered.ply` (default iterations: 20000).
 - **Notes**:
   - Combined unpartitioned `combined_splat.ply` is not uploaded by default.
 
