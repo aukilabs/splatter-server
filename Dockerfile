@@ -54,6 +54,7 @@ RUN apt-get update && \
         xorg-dev \
         libglu1-mesa-dev \
         libglib2.0-0 \
+        libgtk-3-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # LichtFeld needs CMake 3.30+
