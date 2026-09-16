@@ -1,14 +1,19 @@
 #!/usr/bin/env bash
 # train_helper.sh - preprocess + train with the locked R2 geometry recipe.
 #
-# Vendored for splatter-server Docker (S1). Based on LichtFeld-Studio R2 helper.
+# Vendored for splatter-server Docker. Synced from LichtFeld-Studio R2 helper
+# (research/gs-geometric-consistency-r2 + SH2 / random bg / final-only eval).
 #
-# R2 (human-locked 2026-09-13):
+# R2 (human-locked 2026-09-13, product flags 2026-09-16):
 #   FastGS / mrnf / max_cap=1M / exposure off (opt-in via --exposure)
 #   NC=0.05 / flatten=0.1 / prior normals=0.05 / depth SSI=0.2
+#   sh_degree=2 / bg_mode=random / eval at final only
+#   resize_factor=2 by default (CLI -r; must be passed — Studio ignores JSON alone)
+#   export: ply (local filter/combine handoff) + sog (product-friendly)
 #
 # Usage:
 #   train_helper.sh <scene> <out>
+#   train_helper.sh -i 20000 <scene> <out>
 #   train_helper.sh -i 20000 -r 2 <scene> <out>
 #   train_helper.sh --exposure <scene> <out>
 #
@@ -16,6 +21,7 @@
 #   LFS_EXE, LICHTFELD_BIN  path to LichtFeld-Studio binary
 #   LFS_ROOT                LichtFeld source tree (default: /app/LichtFeld-Studio)
 #   LFS_PYTHON              Python interpreter for optional results summary
+#   No --config on the product path (recipe is CLI flags below).
 
 set -euo pipefail
 
@@ -28,7 +34,7 @@ usage() {
 }
 
 ITERATIONS=30000
-RESIZE_FACTOR=""
+RESIZE_FACTOR=2
 EXPOSURE=0
 SCENE=""
 OUT=""
@@ -149,9 +155,8 @@ fi
 
 echo "==> train R2 recipe"
 echo "    iters=${ITERATIONS}  out=${OUT}"
-if [[ -n "${RESIZE_FACTOR}" ]]; then
-  echo "    resize_factor=${RESIZE_FACTOR}"
-fi
+echo "    resize_factor=${RESIZE_FACTOR}"
+echo "    sh_degree=2 bg_mode=random export=ply,sog"
 echo "    NC=0.05 flatten=0.1 prior_normals=0.05 depth_ssi=0.2 exposure=${EXPOSURE_LABEL}"
 
 TRAIN_CMD=(
@@ -163,9 +168,12 @@ TRAIN_CMD=(
   --strategy mrnf
   --max-cap 1000000
   -i "${ITERATIONS}"
+  -r "${RESIZE_FACTOR}"
+  --sh-degree 2
+  --bg-mode random
   --eval
   --eval-steps "${ITERATIONS}"
-  --export ply
+  --export ply,sog
   --use-normal-loss
   --normal-loss-weight 0.05
   --normal-consistency-weight 0.05
@@ -175,10 +183,6 @@ TRAIN_CMD=(
   --depth-loss-weight 0.2
   --quiet
 )
-
-if [[ -n "${RESIZE_FACTOR}" ]]; then
-  TRAIN_CMD+=(-r "${RESIZE_FACTOR}")
-fi
 
 if [[ "${EXPOSURE}" -eq 1 ]]; then
   TRAIN_CMD+=(--exposure-correction)
@@ -190,6 +194,7 @@ echo "==> results summary (PSNR / LEP)"
 if [[ ! -f "${SUMMARY_PY}" ]]; then
   echo "warning: skipping results summary (missing ${SUMMARY_PY})" >&2
 else
+  # Soft-fail: product jobs must not die on missing cv2 / LEP tooling.
   set +e
   "${PYTHON}" "${SUMMARY_PY}" \
     --out-dir "${OUT}" \
@@ -206,6 +211,7 @@ fi
 echo "==> done"
 echo "    output:  ${OUT}"
 echo "    ply:     ${OUT}/splat_${ITERATIONS}.ply"
+echo "    sog:     ${OUT}/splat_${ITERATIONS}.sog"
 if [[ -f "${OUT}/results_summary.txt" ]]; then
   echo "    summary: ${OUT}/results_summary.txt"
   echo "             ${OUT}/results_summary.json"

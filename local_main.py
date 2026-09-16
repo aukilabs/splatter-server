@@ -204,7 +204,7 @@ def scan_main(job_root: Path, scan_id: str, iterations: int = 20000,
               bundle_adjust: bool = True) -> None:
     start_time = time.time()
 
-    # R2 helper outputs splat_{iterations}.ply (sparsity steps not applied).
+    # R2 helper exports splat_{iterations}.ply (+ .sog). Filter/combine still use PLY.
     splat_filename = f"splat_{iterations}"
     splat_dir = job_root / "refined" / "local" / scan_id / "splat"
     if reuse_trained and (splat_dir / f"{splat_filename}.ply").exists():

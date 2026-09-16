@@ -19,6 +19,7 @@ This document defines the runtime contract for the splatter capabilities impleme
 
 ## Capability: `/splatter/local/v1`
 
+- **Trainer**: R2 via `scripts/train_helper.sh` (`-i` default 20000, `-r 2`, SH2, random bg, depth SSI + normals; exports `ply,sog`). Legacy colmap path keeps `use_train_helper=False`.
 - **Input expectation**:
   - Task input CID points to a manifest JSON containing `dataIDs`.
   - Referenced domain data for each scan includes:
