@@ -1,0 +1,8 @@
+FROM splatter-server:latest
+USER root
+COPY scripts/train_helper.sh /app/scripts/train_helper.sh
+COPY local_main.py /app/local_main.py
+COPY CAPABILITIES.md /app/CAPABILITIES.md
+RUN chmod +x /app/scripts/train_helper.sh \
+    && sed -i "s/\r$//" /app/scripts/train_helper.sh
+USER 1000:1000
