@@ -15,7 +15,8 @@ Usage with job-root (recommended):
 
     This will:
     - Discover scan IDs from job_root/datasets/
-    - Read transforms from job_root/refined/global/refined_manifest.json (alignedScans)
+    - Read COLMAP Sim3 transforms from job_root/refined/global/refined_manifest.json
+      (alignedScans or scanAlignmentTransforms)
     - Load splats from job_root/refined/local/<scan_id>/splat/splat_20000.ply
     - Write output to job_root/refined/global/combined_splat.ply
 
@@ -27,13 +28,17 @@ Usage with explicit files:
         --output combined.ply
 
 Transform JSON format (refined_manifest.json style):
+Transforms are COLMAP-frame Sim3 (same frame as local refined SFM COLMAP).
+Quaternion dict keys x,y,z,w are manifest storage format only (xyzw → wxyz internally).
+Use scanAlignmentTransforms or alignedScans (equivalent).
+
 {
-    "alignedScans": {
+    "scanAlignmentTransforms": {
         "scan_id": {
-            "localToDomain": {
+            "localToGlobalColmap": {
                 "scale": "1.0",
                 "position": {"x": "0", "y": "0", "z": "0"},
-                "rotation": {"x": "0", "y": "0", "z": "0", "w": "1"}  // OpenGL xyzw
+                "rotation": {"x": "0", "y": "0", "z": "0", "w": "1"}
             }
         }
     }
@@ -286,7 +291,7 @@ def load_transform(transform_data: dict, apply_pre_rotation: bool = True) -> tup
     Combined: R_final = R_align @ R_pre
 
     Supports two formats:
-    1. Manifest format (OpenGL style from refined_manifest.json):
+    1. Manifest format (COLMAP-frame localToGlobalColmap from refined_manifest.json):
        {"scale": "1.0", "position": {"x": ..., "y": ..., "z": ...}, 
         "rotation": {"x": ..., "y": ..., "z": ..., "w": ...}}
     2. Simple format:
@@ -307,7 +312,7 @@ def load_transform(transform_data: dict, apply_pre_rotation: bool = True) -> tup
         
         t = np.array([float(pos["x"]), float(pos["y"]), float(pos["z"])])
         
-        # OpenGL quaternion format: xyzw -> convert to wxyz for our functions
+        # Manifest xyzw storage -> wxyz for internal quaternion math
         qx, qy, qz, qw = float(rot["x"]), float(rot["y"]), float(rot["z"]), float(rot["w"])
         rotation_wxyz = np.array([qw, qx, qy, qz])
         R = quaternion_to_rotation_matrix(rotation_wxyz)
@@ -411,24 +416,45 @@ def discover_scans_and_transforms(job_root: Path, scan_ids: Optional[list] = Non
     print(f"Loading transforms from: {manifest_path}")
     with open(manifest_path, "r") as f:
         manifest = json.load(f)
-    
-    aligned_scans = manifest.get("alignedScans", {})
+
+    # Reconstruction historically used "alignedScans"; newer manifests may use
+    # "scanAlignmentTransforms". Both hold {scan_id: {localToGlobalColmap: {...}}}.
+    aligned_scans = (
+        manifest.get("alignedScans")
+        or manifest.get("scanAlignmentTransforms")
+        or {}
+    )
     if not aligned_scans:
-        raise ValueError("No 'alignedScans' found in manifest")
-    
+        raise ValueError(
+            "Manifest has no alignedScans or scanAlignmentTransforms; "
+            "cannot combine splats without COLMAP Sim3 alignment transforms."
+        )
+
     result = {}
     for scan_id in scan_ids:
         if scan_id not in aligned_scans:
             print(f"Warning: No transform for scan '{scan_id}' in manifest, skipping.", file=sys.stderr)
             continue
-        
-        transform_data = aligned_scans[scan_id].get("localToDomain")
+
+        entry = aligned_scans[scan_id]
+        transform_data = None
+        if isinstance(entry, dict):
+            # Prefer new key; accept legacy localToDomain from older drafts.
+            transform_data = entry.get("localToGlobalColmap") or entry.get("localToDomain")
+            if transform_data is None and (
+                "position" in entry or "matrix" in entry or "translation" in entry
+            ):
+                # Allow bare transform-shaped entries.
+                transform_data = entry
         if transform_data is None:
-            print(f"Warning: No 'localToDomain' for scan '{scan_id}', skipping.", file=sys.stderr)
+            print(
+                f"Warning: No 'localToGlobalColmap' for scan '{scan_id}', skipping.",
+                file=sys.stderr,
+            )
             continue
-        
+
         result[scan_id] = {"transform": transform_data}
-    
+
     return result
 
 
@@ -514,12 +540,18 @@ def combine_splats_explicit(args: argparse.Namespace) -> None:
     with open(args.transforms, "r") as f:
         transforms = json.load(f)
     
-    # Handle manifest-style transforms (with alignedScans key)
-    if "alignedScans" in transforms:
-        transforms = {
-            scan_id: data.get("localToDomain", data)
-            for scan_id, data in transforms["alignedScans"].items()
-        }
+    # Handle manifest-style transforms (alignedScans or scanAlignmentTransforms)
+    for key in ("alignedScans", "scanAlignmentTransforms"):
+        if key in transforms and isinstance(transforms[key], dict):
+            transforms = {
+                scan_id: (
+                    (data.get("localToGlobalColmap") or data.get("localToDomain") or data)
+                    if isinstance(data, dict)
+                    else data
+                )
+                for scan_id, data in transforms[key].items()
+            }
+            break
     
     all_vertices = []
     scan_ids_processed = []
@@ -536,8 +568,11 @@ def combine_splats_explicit(args: argparse.Namespace) -> None:
             transforms.get(scan_id)
         )
         if transform_data is None:
-            print(f"Warning: No transform found for {splat_path}, using identity.", file=sys.stderr)
-            transform_data = {"scale": 1.0, "rotation": [1, 0, 0, 0], "translation": [0, 0, 0]}
+            raise ValueError(
+                f"No COLMAP Sim3 transform found for splat {splat_path} "
+                f"(tried path, filename, scan_id '{scan_id}'); "
+                "cannot combine without alignment transforms."
+            )
         
         print(f"Loading splat: {splat_path}")
         ply = PlyData.read(str(splat_path))
