@@ -42,7 +42,7 @@ def combine(job_root: Path, scan_ids: list[str], use_filtered: bool = True,
     return combined_ply_path
 
 
-def partition(combined_ply_path: Path, partition_size: float = 2.0) -> list[Path]:
+def partition(combined_ply_path: Path, partition_size: float = 5.0) -> list[Path]:
     """Partition a combined splat into tiles."""
     print(f"[global] Partitioning with size {partition_size}m...")
     
@@ -103,7 +103,7 @@ def main(job_root: Path, scan_ids: list[str],
          base_filename: str = "splat_20000",
          sparsify_steps: int = 0,
          use_filtered: bool = True,
-         do_partition: bool = True, partition_size: float = 2.0,
+         do_partition: bool = True, partition_size: float = 5.0,
          do_convert_splat: bool = True, do_convert_sog: bool = False) -> dict:
     """
     Run global splat processing pipeline.
@@ -154,7 +154,7 @@ if __name__ == "__main__":
     parser.add_argument("--sparsify-steps", type=int, default=0)
     parser.add_argument("--use-filtered", action="store_true", default=True)
     parser.add_argument("--no-partition", action="store_true", default=False)
-    parser.add_argument("--partition-size", type=float, default=2.0)
+    parser.add_argument("--partition-size", type=float, default=5.0)
     parser.add_argument("--convert-splat", action="store_true", default=True)
     parser.add_argument("--convert-sog", action="store_true", default=False)
     

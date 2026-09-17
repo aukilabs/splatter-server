@@ -6,7 +6,7 @@ Partition a Gaussian splat PLY file into separate tiles along x/z axes.
 Each gaussian is assigned to a tile based on its position.
 
 Usage:
-    python partition_splat.py input.ply --partition-size 2.0 --output-dir ./partitions
+    python partition_splat.py input.ply --partition-size 5.0 --output-dir ./partitions
 
 Output files are named: <base>_partition_<size>_<x>_<z>.ply
 where x and z are tile indices. The rendering app can translate each tile
@@ -126,8 +126,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--partition-size",
         type=float,
-        default=2.0,
-        help="Size of each partition tile in meters. Default: 2.0"
+        default=5.0,
+        help="Size of each partition tile in meters. Default: 5.0"
     )
     parser.add_argument(
         "--output-dir", "-o",

@@ -6,7 +6,7 @@
 #
 # R2 (human-locked 2026-09-13, product flags 2026-09-16):
 #   FastGS / mrnf / max_cap=1M / exposure off (opt-in via --exposure)
-#   NC=0.05 / flatten=0.1 / prior normals=0.05 / depth SSI=0.2
+#   NC=0.1 / flatten=0.2 / prior normals=0.1 / depth SSI=0.4
 #   sh_degree=2 / bg_mode=random / eval at final only
 #   resize_factor=2 by default (CLI -r; must be passed — Studio ignores JSON alone)
 #   export: ply (local filter/combine handoff) + sog (product-friendly)
@@ -157,7 +157,7 @@ echo "==> train R2 recipe"
 echo "    iters=${ITERATIONS}  out=${OUT}"
 echo "    resize_factor=${RESIZE_FACTOR}"
 echo "    sh_degree=2 bg_mode=random export=ply,sog"
-echo "    NC=0.05 flatten=0.1 prior_normals=0.05 depth_ssi=0.2 exposure=${EXPOSURE_LABEL}"
+echo "    NC=0.1 flatten=0.2 prior_normals=0.1 depth_ssi=0.4 exposure=${EXPOSURE_LABEL}"
 
 TRAIN_CMD=(
   "${EXE}"
@@ -175,12 +175,12 @@ TRAIN_CMD=(
   --eval-steps "${ITERATIONS}"
   --export ply,sog
   --use-normal-loss
-  --normal-loss-weight 0.05
-  --normal-consistency-weight 0.05
-  --normal-flatten-weight 0.1
+  --normal-loss-weight 0.1
+  --normal-consistency-weight 0.1
+  --normal-flatten-weight 0.2
   --use-depth-loss
   --depth-loss-mode ssi
-  --depth-loss-weight 0.2
+  --depth-loss-weight 0.4
   --quiet
 )
 

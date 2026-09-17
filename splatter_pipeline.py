@@ -163,24 +163,24 @@ def run_colmap_single_splat(job_root: Path, iterations: int, enable_sparsity: bo
         enable_sparsity=enable_sparsity,
         sparsify_steps=sparsify_steps,
         init_ply=None,
-        use_train_helper=False,
+        use_train_helper=True,
     )
 
     _progress("filtering", 85, "filtering gaussians")
-    total_iters = iterations + sparsify_steps
-    input_ply = splat_dir / f"splat_{total_iters}.ply"
-    filtered_ply = splat_dir / f"splat_{total_iters}.filtered.ply"
+    input_ply = splat_dir / f"splat_{iterations}.ply"
+    filtered_ply = splat_dir / f"splat_{iterations}.filtered.ply"
     filter_args = argparse.Namespace(
         input_ply=input_ply,
         output_ply=filtered_ply,
         colmap_path=colmap_sparse,
         overwrite=True,
-        min_opacity=-2.2, # logits approx same as 0.1 alpha in 0..1 range
+        # Looser post-cleanup (was -2.2 / 5 / 3.0).
+        min_opacity=-3.0,  # logits; keep more low-alpha gaussians
         #max_size=10.0,
         #min_size=0.001,
-        min_view_count=5,
+        min_view_count=3,
         view_min_depth=0.1,
-        view_max_depth=3.0,
+        view_max_depth=5.0,
         outlier_radius=None,
     )
     filter_splats.main(filter_args)
@@ -192,7 +192,7 @@ def run_colmap_single_splat(job_root: Path, iterations: int, enable_sparsity: bo
     vert = PlyData.read(str(filtered_ply))["vertex"].data
     vert = transform_splat_data(vert, scale=1.0, R=PRE_ROTATION_MATRIX, t=np.zeros(3))
     
-    rotated_ply_path = splat_dir / f"splat_{total_iters}.filtered.rotated.ply"
+    rotated_ply_path = splat_dir / f"splat_{iterations}.filtered.rotated.ply"
     output_el = PlyElement.describe(vert, "vertex")
     PlyData([output_el], text=False).write(str(rotated_ply_path))
 
@@ -277,6 +277,7 @@ def run_global_only(
     partition_size: float,
     convert_to_splat: bool,
     convert_to_sog: bool,
+    manifest_timestamp: str | None = None,
 ) -> dict:
     if not scan_ids:
         scan_ids = discover_scan_ids(job_root)
@@ -304,7 +305,13 @@ def run_global_only(
         for f in global_dir.iterdir():
             if not f.is_file():
                 continue
-            dest_name = rename_for_domain_upload(f.name)
+            if f.suffix == ".sog" and not manifest_timestamp:
+                raise ValueError(
+                    "manifest_timestamp is required to stage SOG partition outputs"
+                )
+            dest_name = rename_for_domain_upload(
+                f.name, manifest_timestamp=manifest_timestamp
+            )
             if dest_name:
                 stage_output(output_dir, f, dest_name)
                 produced.append(dest_name)
@@ -334,6 +341,12 @@ def main() -> None:
     parser.add_argument("--convert_to_splat", action="store_true", default=True)
     parser.add_argument("--no_convert_to_splat", action="store_true", default=False)
     parser.add_argument("--convert_to_sog", action="store_true", default=False)
+    parser.add_argument(
+        "--manifest_timestamp",
+        type=str,
+        default=None,
+        help="Suffix from refined_manifest_* (e.g. 2026-09-17_14-55-56) for domain SOG naming",
+    )
     args = parser.parse_args()
 
     job_root = args.job_root_path
@@ -375,6 +388,7 @@ def main() -> None:
             partition_size=args.partition_size,
             convert_to_splat=convert_to_splat,
             convert_to_sog=convert_to_sog,
+            manifest_timestamp=args.manifest_timestamp,
         )
 
 

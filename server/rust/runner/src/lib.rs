@@ -166,6 +166,29 @@ fn parse_domain_from_cid(cid: &str) -> Option<(String, String)> {
     Some((base, domain_id))
 }
 
+/// Map a GlobalV1 input name (dataID or bare input cid) to (lookup_name, data_type).
+/// Manifests often list `refined_scan_<scan_id>` even for global; those resolve to
+/// `local_splat_ply_<scan_id>`.
+fn global_input_name_query(raw: &str) -> Option<(String, &'static str)> {
+    if raw.starts_with("local_splat_ply_") {
+        Some((raw.to_string(), "local_splat_ply"))
+    } else if raw.starts_with("refined_manifest") {
+        Some((raw.to_string(), "refined_manifest_json"))
+    } else if let Some(scan_id) = raw.strip_prefix("refined_scan_") {
+        if scan_id.is_empty() {
+            None
+        } else {
+            Some((format!("local_splat_ply_{scan_id}"), "local_splat_ply"))
+        }
+    } else {
+        None
+    }
+}
+
+fn is_url_cid(cid: &str) -> bool {
+    cid.contains("://")
+}
+
 #[async_trait]
 impl compute_runner_api::Runner for SplatterRunner {
     fn capability(&self) -> &'static str {
@@ -212,7 +235,7 @@ impl compute_runner_api::Runner for SplatterRunner {
             // Materialize all input CIDs. Older /splatter/colmap/v1 jobs can provide
             // multiple input CIDs, so preserve that behavior for compatibility.
             let input_cids = lease.task.inputs_cids.clone();
-            info!("input cids");
+            info!(?input_cids, "input cids");
             let mut summary = DownloadSummary::default();
 
             if input_cids.is_empty() {
@@ -220,6 +243,87 @@ impl compute_runner_api::Runner for SplatterRunner {
             }
 
             for cid in input_cids {
+                // Global (and some DMT jobs) pass artifact names as extra inputs_cids
+                // alongside the manifest URL. Those are not domain-data URLs — resolve
+                // by name instead of materialize_cid_with_meta.
+                if !is_url_cid(&cid) {
+                    if mode != CapabilityMode::GlobalV1 {
+                        return Err(anyhow!(
+                            "named input cid {} is only supported for /splatter/global/v1",
+                            cid
+                        ));
+                    }
+                    let Some((query_name, data_type)) = global_input_name_query(&cid) else {
+                        return Err(anyhow!("unsupported named input cid {}", cid));
+                    };
+                    let (Some(domain_base_raw), Some(domain_id)) = (
+                        domain_base_from_input.as_deref(),
+                        domain_id_from_input.as_deref(),
+                    ) else {
+                        return Err(anyhow!(
+                            "cannot resolve named input cid {}: domain routing unknown",
+                            cid
+                        ));
+                    };
+                    let domain_base = domain_base_raw.trim_end_matches('/').to_string();
+                    let query = DownloadQuery {
+                        ids: vec![],
+                        name: Some(query_name.clone()),
+                        data_type: Some(data_type.to_string()),
+                    };
+                    let meta_list = download_metadata_v1(
+                        &domain_base,
+                        &client_id,
+                        &token,
+                        domain_id,
+                        &query,
+                    )
+                    .await
+                    .with_context(|| format!("resolve named input cid {}", cid))?;
+                    let Some(meta) = meta_list.into_iter().next() else {
+                        return Err(anyhow!(
+                            "named input cid {} resolved empty (name={} type={})",
+                            cid,
+                            query_name,
+                            data_type
+                        ));
+                    };
+                    info!(
+                        data_id = %meta.id,
+                        name = %meta.name,
+                        data_type = %meta.data_type,
+                        name_query = %query_name,
+                        raw_cid = %cid,
+                        "resolved named input cid by name"
+                    );
+                    if refined_suffix.is_none() {
+                        refined_suffix = extract_refined_suffix(Some(&meta.name));
+                    }
+                    let partial = materialize_inputs_for_mode(
+                        mode,
+                        &[DataMeta {
+                            id: meta.id,
+                            name: meta.name,
+                            data_type: meta.data_type,
+                            domain_id: meta.domain_id,
+                        }],
+                        &domain_base,
+                        &client_id,
+                        &token,
+                        &job_root,
+                        &ctx,
+                    )
+                    .await
+                    .with_context(|| format!("materialize named input cid {}", cid))?;
+                    summary.datasets_downloaded += partial.datasets_downloaded;
+                    for scan_id in partial.scan_ids {
+                        if !summary.scan_ids.contains(&scan_id) {
+                            summary.scan_ids.push(scan_id);
+                        }
+                    }
+                    continue;
+                }
+
                 let materialized = ctx
                     .input
                     .materialize_cid_with_meta(&cid)
@@ -316,6 +420,46 @@ impl compute_runner_api::Runner for SplatterRunner {
                     "dataIDs": data_ids
                 }))
                 .await?;
+
+            // Global expects the refined manifest at
+            // job_root/refined/global/refined_manifest.json. When the task input
+            // CID *is* that artifact, stage it from the already-materialized bytes.
+            if mode == CapabilityMode::GlobalV1 {
+                let is_refined_manifest = materialized
+                    .data_type
+                    .as_deref()
+                    .is_some_and(|t| t == "refined_manifest_json")
+                    || materialized
+                        .name
+                        .as_deref()
+                        .is_some_and(|n| n.starts_with("refined_manifest"))
+                    || parsed_json.get("alignedScans").is_some();
+                if is_refined_manifest {
+                    let dest = job_root
+                        .join("refined")
+                        .join("global")
+                        .join("refined_manifest.json");
+                    if let Some(parent) = dest.parent() {
+                        tokio::fs::create_dir_all(parent).await?;
+                    }
+                    tokio::fs::write(&dest, &bytes).await.with_context(|| {
+                        format!("stage refined manifest to {}", dest.display())
+                    })?;
+                    info!(
+                        dest = %dest.display(),
+                        name = ?materialized.name,
+                        "staged refined manifest from input cid"
+                    );
+                    ctx.ctrl
+                        .log_event(json!({
+                            "level": "info",
+                            "message": "staged refined manifest from input cid",
+                            "dest": dest.display().to_string(),
+                            "name": materialized.name,
+                        }))
+                        .await?;
+                }
+            }
 
             if !data_id_list.is_empty() {
                 if let (Some(domain_base_raw), Some(domain_id)) = (
@@ -441,9 +585,10 @@ impl compute_runner_api::Runner for SplatterRunner {
                         }
                     }
 
-                    // Fallback for inputs that provide refined_scan_* names instead of
-                    // domain data IDs: derive the matching dmt_recording_* by name.
+                    // Fallback for inputs that provide refined_scan_* / dmt_recording_*
+                    // names instead of domain data IDs: resolve artifacts by name.
                     let mut seen_scan_ids: HashSet<String> = HashSet::new();
+                    let mut downloaded_refined_zips: HashSet<String> = HashSet::new();
                     for raw in &data_id_list {
                         let scan_id = if let Some(rest) = raw.strip_prefix("refined_scan_") {
                             rest.to_string()
@@ -533,6 +678,183 @@ impl compute_runner_api::Runner for SplatterRunner {
                                         "failed metadata lookup for derived dmt recording"
                                     );
                                 }
+                            }
+                        }
+
+                        // LocalV1 also needs RefinedScan.zip; resolve refined_scan_* by name
+                        // the same way we derive the recording when dataIDs are names.
+                        if mode == CapabilityMode::LocalV1
+                            && !downloaded_refined_zips.contains(&scan_id)
+                        {
+                            let dest_path =
+                                datasets_dir.join(&scan_id).join("RefinedScan.zip");
+                            if tokio::fs::try_exists(&dest_path).await.unwrap_or(false) {
+                                downloaded_refined_zips.insert(scan_id.clone());
+                            } else {
+                                let refined_name = format!("refined_scan_{scan_id}");
+                                let query = DownloadQuery {
+                                    ids: vec![],
+                                    name: Some(refined_name.clone()),
+                                    data_type: Some("refined_scan_zip".to_string()),
+                                };
+                                match download_metadata_v1(
+                                    &domain_base,
+                                    &client_id,
+                                    &token,
+                                    domain_id,
+                                    &query,
+                                )
+                                .await
+                                {
+                                    Ok(meta_list) => {
+                                        if let Some(meta) = meta_list.into_iter().next() {
+                                            let data_id = meta.id.clone();
+                                            let domain_id_for_download = meta.domain_id.clone();
+                                            match download_by_id(
+                                                &domain_base,
+                                                &client_id,
+                                                &token,
+                                                &domain_id_for_download,
+                                                &data_id,
+                                            )
+                                            .await
+                                            {
+                                                Ok(bytes) => {
+                                                    if let Some(parent) = dest_path.parent() {
+                                                        tokio::fs::create_dir_all(parent).await?;
+                                                    }
+                                                    tokio::fs::write(&dest_path, &bytes).await?;
+                                                    summary.datasets_downloaded += 1;
+                                                    downloaded_refined_zips.insert(scan_id.clone());
+                                                    if !summary.scan_ids.contains(&scan_id) {
+                                                        summary.scan_ids.push(scan_id.clone());
+                                                    }
+                                                    ctx.ctrl
+                                                        .log_event(json!({
+                                                            "level": "info",
+                                                            "message": "downloaded derived refined scan zip",
+                                                            "data_id": data_id,
+                                                            "scan_id": scan_id,
+                                                            "bytes": bytes.len(),
+                                                            "dest": dest_path.display().to_string(),
+                                                            "name_query": refined_name,
+                                                        }))
+                                                        .await?;
+                                                }
+                                                Err(err) => {
+                                                    warn!(
+                                                        data_id = %data_id,
+                                                        scan_id = %scan_id,
+                                                        error = %err,
+                                                        "failed to download derived refined scan zip"
+                                                    );
+                                                }
+                                            }
+                                        } else {
+                                            warn!(
+                                                scan_id = %scan_id,
+                                                name_query = %refined_name,
+                                                "refined scan zip metadata empty for name query"
+                                            );
+                                        }
+                                    }
+                                    Err(err) => {
+                                        warn!(
+                                            scan_id = %scan_id,
+                                            name_query = %refined_name,
+                                            error = %err,
+                                            "failed metadata lookup for derived refined scan zip"
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // GlobalV1: dataIDs may be artifact names (local_splat_ply_*,
+                    // refined_scan_* → local_splat_ply_*, refined_manifest*) instead
+                    // of UUIDs — resolve by name.
+                    if mode == CapabilityMode::GlobalV1 {
+                        for raw in &data_id_list {
+                            let Some((query_name, data_type)) = global_input_name_query(raw) else {
+                                continue;
+                            };
+                            if all_metadata.iter().any(|m| m.name == query_name || m.name == *raw)
+                            {
+                                continue;
+                            }
+                            let query = DownloadQuery {
+                                ids: vec![],
+                                name: Some(query_name.clone()),
+                                data_type: Some(data_type.to_string()),
+                            };
+                            match download_metadata_v1(
+                                &domain_base,
+                                &client_id,
+                                &token,
+                                domain_id,
+                                &query,
+                            )
+                            .await
+                            {
+                                Ok(meta_list) => {
+                                    if let Some(meta) = meta_list.into_iter().next() {
+                                        info!(
+                                            data_id = %meta.id,
+                                            name = %meta.name,
+                                            data_type = %meta.data_type,
+                                            name_query = %query_name,
+                                            raw = %raw,
+                                            "resolved global input by name"
+                                        );
+                                        ctx.ctrl
+                                            .log_event(json!({
+                                                "level": "info",
+                                                "message": "resolved global input by name",
+                                                "data_id": meta.id,
+                                                "name": meta.name,
+                                                "data_type": meta.data_type,
+                                                "name_query": query_name,
+                                                "raw": raw,
+                                            }))
+                                            .await?;
+                                        if refined_suffix.is_none() {
+                                            refined_suffix =
+                                                extract_refined_suffix(Some(&meta.name));
+                                        }
+                                        all_metadata.push(DataMeta {
+                                            id: meta.id,
+                                            name: meta.name,
+                                            data_type: meta.data_type,
+                                            domain_id: meta.domain_id,
+                                        });
+                                    } else {
+                                        warn!(
+                                            name_query = %query_name,
+                                            data_type = %data_type,
+                                            raw = %raw,
+                                            "global name lookup returned empty metadata"
+                                        );
+                                    }
+                                }
+                                Err(err) => {
+                                    warn!(
+                                        name_query = %query_name,
+                                        data_type = %data_type,
+                                        raw = %raw,
+                                        error = %err,
+                                        "failed metadata lookup for global name input"
+                                    );
+                                }
+                            }
+                        }
+                    }
+
+                    if refined_suffix.is_none() {
+                        for m in &all_metadata {
+                            if let Some(suffix) = extract_refined_suffix(Some(&m.name)) {
+                                refined_suffix = Some(suffix);
+                                break;
                             }
                         }
                     }
@@ -663,6 +985,14 @@ impl compute_runner_api::Runner for SplatterRunner {
             }
             args
         };
+
+        if mode == CapabilityMode::GlobalV1 {
+            if let Some(suffix) = refined_suffix.as_deref() {
+                let ts = suffix.strip_prefix('_').unwrap_or(suffix);
+                cmd_args.push("--manifest_timestamp".to_string());
+                cmd_args.push(ts.to_string());
+            }
+        }
 
         ctx.ctrl
             .progress(json!({
