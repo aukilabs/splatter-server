@@ -1,27 +1,25 @@
 #!/usr/bin/env bash
-# train_helper.sh - preprocess + train with the locked R2 geometry recipe.
+# train_helper.sh - preprocess + train with the default LichtFeld recipe.
 #
-# Vendored for splatter-server Docker. Synced from LichtFeld-Studio R2 helper
-# (research/gs-geometric-consistency-r2 + SH2 / random bg / final-only eval).
+# Vendored for splatter-server Docker. Synced from LichtFeld-Studio train_helper.
 #
-# R2 (human-locked 2026-09-13, product flags 2026-09-16):
-#   FastGS / mrnf / max_cap=1M / exposure off (opt-in via --exposure)
+# Recipe lives in config/lichtfeld_optimization_params.json:
+#   mrnf / max_cap=1M / SH2 / random bg
 #   NC=0.1 / flatten=0.2 / prior normals=0.1 / depth SSI=0.4
-#   sh_degree=2 / bg_mode=random / eval at final only
-#   resize_factor=2 by default (CLI -r; must be passed — Studio ignores JSON alone)
-#   export: ply (local filter/combine handoff) + sog (product-friendly)
+#   min_opacity=0.02 / scale_reg=0.01 / scale_decay=0.003 / oversize_split=0.25
+#   use_exposure_correction on
+# CLI only for runtime paths + overrides that depend on -i / -r / export.
 #
 # Usage:
 #   train_helper.sh <scene> <out>
 #   train_helper.sh -i 20000 <scene> <out>
 #   train_helper.sh -i 20000 -r 2 <scene> <out>
-#   train_helper.sh --exposure <scene> <out>
 #
 # Optional env:
 #   LFS_EXE, LICHTFELD_BIN  path to LichtFeld-Studio binary
 #   LFS_ROOT                LichtFeld source tree (default: /app/LichtFeld-Studio)
 #   LFS_PYTHON              Python interpreter for optional results summary
-#   No --config on the product path (recipe is CLI flags below).
+#   LICHTFELD_CONFIG        train JSON (default: ../config/lichtfeld_optimization_params.json)
 
 set -euo pipefail
 
@@ -29,13 +27,12 @@ HELPER_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LFS_ROOT="${LFS_ROOT:-/app/LichtFeld-Studio}"
 
 usage() {
-  echo "usage: $0 [-i iterations] [-r resize_factor] [--exposure] <scene> <out>" >&2
+  echo "usage: $0 [-i iterations] [-r resize_factor] <scene> <out>" >&2
   exit 2
 }
 
 ITERATIONS=30000
 RESIZE_FACTOR=2
-EXPOSURE=0
 SCENE=""
 OUT=""
 
@@ -50,10 +47,6 @@ while [[ $# -gt 0 ]]; do
       [[ $# -ge 2 ]] || usage
       RESIZE_FACTOR="$2"
       shift 2
-      ;;
-    --exposure|--exposure-correction)
-      EXPOSURE=1
-      shift
       ;;
     -h|--help)
       usage
@@ -147,46 +140,32 @@ echo "==> preprocess (MoGe-2 depth + normals)"
 echo "    scene=${SCENE}"
 "${EXE}" preprocess "${SCENE}" --mode both
 
-if [[ "${EXPOSURE}" -eq 1 ]]; then
-  EXPOSURE_LABEL=on
-else
-  EXPOSURE_LABEL=off
+CONFIG="${LICHTFELD_CONFIG:-${HELPER_DIR}/../config/lichtfeld_optimization_params.json}"
+if [[ ! -f "${CONFIG}" ]]; then
+  echo "error: train config missing: ${CONFIG}" >&2
+  echo "       set LICHTFELD_CONFIG or place lichtfeld_optimization_params.json under config/" >&2
+  exit 1
 fi
 
-echo "==> train R2 recipe"
+echo "==> train"
 echo "    iters=${ITERATIONS}  out=${OUT}"
 echo "    resize_factor=${RESIZE_FACTOR}"
-echo "    sh_degree=2 bg_mode=random export=ply,sog"
-echo "    NC=0.1 flatten=0.2 prior_normals=0.1 depth_ssi=0.4 exposure=${EXPOSURE_LABEL}"
+echo "    config=${CONFIG}"
+echo "    export=ply,sog"
 
 TRAIN_CMD=(
   "${EXE}"
   --headless
   --train
+  --config "${CONFIG}"
   -d "${SCENE}"
   -o "${OUT}"
-  --strategy mrnf
-  --max-cap 1000000
   -i "${ITERATIONS}"
   -r "${RESIZE_FACTOR}"
-  --sh-degree 2
-  --bg-mode random
-  --eval
   --eval-steps "${ITERATIONS}"
   --export ply,sog
-  --use-normal-loss
-  --normal-loss-weight 0.1
-  --normal-consistency-weight 0.1
-  --normal-flatten-weight 0.2
-  --use-depth-loss
-  --depth-loss-mode ssi
-  --depth-loss-weight 0.4
   --quiet
 )
-
-if [[ "${EXPOSURE}" -eq 1 ]]; then
-  TRAIN_CMD+=(--exposure-correction)
-fi
 
 "${TRAIN_CMD[@]}"
 
@@ -200,7 +179,7 @@ else
     --out-dir "${OUT}" \
     --iterations "${ITERATIONS}" \
     --executable "${EXE}" \
-    --arm R2
+    --arm default
   SUMMARY_RC=$?
   set -e
   if [[ "${SUMMARY_RC}" -ne 0 ]]; then

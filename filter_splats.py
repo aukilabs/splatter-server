@@ -66,6 +66,7 @@ def default_args() -> argparse.Namespace:
     return argparse.Namespace(
         input_ply=None,
         output_ply=None,
+        output_ply_2=None,
         job_root=None,
         splat_filename="splat_20000",
         overwrite=False,
@@ -92,6 +93,17 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--input-ply", "-i", help="Input Gaussian-splat .ply file", default=None)
     parser.add_argument("--output-ply", "-o", help="Output .ply file after filtering", default=None)
+    parser.add_argument(
+        "--output-ply-2",
+        nargs="?",
+        const=True,
+        default=None,
+        help=(
+            "Optional output .ply file for removed splats (split operation). "
+            "In explicit mode, provide a path. In job-root mode, use as a flag "
+            "to auto-derive paths as {splat_filename}.filtered_removed.ply"
+        ),
+    )
     parser.add_argument("--job-root", type=Path, help="Job root directory, to process splats within refinement", default=None)
     parser.add_argument("--splat-filename", type=str, help="Base name of the splat file to filter", default="splat_20000")
     parser.add_argument("--overwrite", action="store_true", help="Force re-processing of existing output splat PLYs.")
@@ -367,7 +379,7 @@ def compute_size_values(vert, args: argparse.Namespace) -> np.ndarray:
         #return np.exp(log_geom_mean)
 
 
-def filter_ply(input_ply, output_ply, args, colmap_path=None):
+def filter_ply(input_ply, output_ply, args, colmap_path=None, output_ply_2=None):
     print(f"Loading PLY: {input_ply}")
     ply = PlyData.read(input_ply)
 
@@ -380,6 +392,9 @@ def filter_ply(input_ply, output_ply, args, colmap_path=None):
 
     num_vertices = len(vert)
     print(f"Found {num_vertices} gaussians (vertices).")
+
+    # Track indices into original array throughout all filtering stages
+    kept_indices = np.arange(num_vertices)
 
     # Start with "keep everything"
     mask = np.ones(num_vertices, dtype=bool)
@@ -412,7 +427,8 @@ def filter_ply(input_ply, output_ply, args, colmap_path=None):
     kept_count = int(mask.sum())
     removed_count = num_vertices - kept_count
     print(f"After opacity/size filter: {kept_count} / {num_vertices} gaussians (removed {removed_count})")
-    
+
+    kept_indices = kept_indices[mask]
     filtered_vert = vert[mask]
 
     # --- View count filtering (on already filtered vertices) ---
@@ -424,20 +440,21 @@ def filter_ply(input_ply, output_ply, args, colmap_path=None):
             cameras = rec.cameras
 
             print(f"Loaded {len(cameras)} cameras")
-            
+
             xyz = np.column_stack([
                 filtered_vert["x"].astype(np.float64),
                 filtered_vert["y"].astype(np.float64),
                 filtered_vert["z"].astype(np.float64),
             ])
-            
+
             print(f"Computing view counts (min_depth={args.view_min_depth}, max_depth={args.view_max_depth})...")
             view_counts, _ = compute_view_counts(rec, xyz, args.view_min_depth, args.view_max_depth)
-            
+
             view_mask = view_counts >= args.min_view_count
             removed_by_view = int((~view_mask).sum())
             print(f"View count filter: removing {removed_by_view} gaussians seen by < {args.min_view_count} cameras")
-            
+
+            kept_indices = kept_indices[view_mask]
             filtered_vert = filtered_vert[view_mask]
             print(f"After view count filter: {len(filtered_vert)} gaussians remaining")
         except Exception as e:
@@ -472,13 +489,25 @@ def filter_ply(input_ply, output_ply, args, colmap_path=None):
         outlier_count = len(filtered_vert) - len(inlier_indices)
         print(f"Removed {outlier_count} outliers, {len(inlier_indices)} remaining.")
 
+        kept_indices = kept_indices[inlier_indices]
         filtered_vert = filtered_vert[inlier_indices]
 
     vertex_el.data = filtered_vert
 
-    # Write out
+    # Write out kept splats
     print(f"Writing filtered PLY to: {output_ply}")
     ply.write(output_ply)
+
+    # Write out removed splats if requested
+    if output_ply_2 is not None:
+        removed_mask = np.ones(num_vertices, dtype=bool)
+        removed_mask[kept_indices] = False
+        removed_vert = vert[removed_mask]
+
+        print(f"Writing {len(removed_vert)} removed splats to: {output_ply_2}")
+        ply_removed = PlyData.read(input_ply)
+        ply_removed["vertex"].data = removed_vert
+        ply_removed.write(output_ply_2)
     
 
 
@@ -548,10 +577,23 @@ def main(args: argparse.Namespace) -> None:
                 colmap_path = get_colmap_path_for_scan(args.job_root, scan_id, args.colmap_rel_path)
                 if colmap_path is None:
                     print(f"Warning: Could not find COLMAP for scan {scan_id} at {args.colmap_rel_path}, skipping view count filter.", file=sys.stderr)
-            filter_ply(in_ply, out_ply, args, colmap_path=colmap_path)
+            out_ply_2 = None
+            if args.output_ply_2 is not None:
+                out_ply_2 = (
+                    args.job_root / "refined" / "local" / scan_id / "splat"
+                    / f"{args.splat_filename}.filtered_removed.ply"
+                )
+            filter_ply(in_ply, out_ply, args, colmap_path=colmap_path, output_ply_2=out_ply_2)
     else:
         colmap_path = args.colmap_path
-        filter_ply(args.input_ply, args.output_ply, args, colmap_path=colmap_path)
+        out_ply_2 = None
+        if args.output_ply_2 is not None:
+            if args.output_ply_2 is True:
+                out_base = Path(args.output_ply)
+                out_ply_2 = str(out_base.with_suffix(".removed.ply"))
+            else:
+                out_ply_2 = args.output_ply_2
+        filter_ply(args.input_ply, args.output_ply, args, colmap_path=colmap_path, output_ply_2=out_ply_2)
 
     print("Done.")
 

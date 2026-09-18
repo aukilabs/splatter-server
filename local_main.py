@@ -163,15 +163,16 @@ def train_splat(colmap_dir: Path, output_dir: Path, images_dir: Path = None,
         images_dir = colmap_dir / "images"
 
     if use_train_helper:
-        # R2 helper path: sparsity, VDA --init, and LICHTFELD_CONFIG* are unsupported.
+        # train_helper path: sparsity and VDA --init unsupported; recipe is
+        # config/lichtfeld_optimization_params.json via train_helper.sh.
         if enable_sparsity:
             print(
-                "[train_splat] enable_sparsity ignored on R2 helper path",
+                "[train_splat] enable_sparsity ignored on train_helper path",
                 flush=True,
             )
         if init_ply is not None:
             print(
-                "[train_splat] init_ply/--init ignored on R2 helper path",
+                "[train_splat] init_ply/--init ignored on train_helper path",
                 flush=True,
             )
 
@@ -201,16 +202,20 @@ def scan_main(job_root: Path, scan_id: str, iterations: int = 20000,
               enable_sparsity: bool = False, sparsify_steps: int = 15000,
               reuse_trained: bool = False, use_vda: bool = False,
               convert_splat: bool = False, convert_sog: bool = False,
-              bundle_adjust: bool = True) -> None:
+              bundle_adjust: bool = False) -> None:
     start_time = time.time()
 
-    # R2 helper exports splat_{iterations}.ply (+ .sog). Filter/combine still use PLY.
+    # train_helper exports splat_{iterations}.ply (+ .sog). Filter/combine still use PLY.
     splat_filename = f"splat_{iterations}"
     splat_dir = job_root / "refined" / "local" / scan_id / "splat"
+    images_dir = job_root / "refined" / "local" / scan_id / "dense" / "images"
+    colmap_dir = job_root / "refined" / "local" / scan_id / "dense" / "sparse"
     if reuse_trained and (splat_dir / f"{splat_filename}.ply").exists():
         print("Splat reuse enabled, skip ahead to filtering")
     else:
         if not use_vda:
+            # BA off by default (intrinsics-only refine was a no-op for pose quality).
+            # Undistort still runs inside preprocessing.scan_main → dense/.
             preprocessing.main(job_root, scan_id, bundle_adjust=bundle_adjust)
             init_ply = None
         else:
@@ -251,14 +256,6 @@ def scan_main(job_root: Path, scan_id: str, iterations: int = 20000,
                 image_path=str(frames_dir)
             )
         
-        if bundle_adjust:
-            images_dir = job_root / "refined" / "local" / scan_id / "dense" / "images"
-            colmap_dir = job_root / "refined" / "local" / scan_id / "dense" / "sparse"
-        else:
-            #colmap_dir = job_root / "refined" / "local" / scan_id / "sfm"
-            colmap_dir = job_root / "refined" / "local" / scan_id / "processed"
-            images_dir = job_root / "datasets" / scan_id / "Frames"
-        
         train_splat(colmap_dir, splat_dir, images_dir, iterations=iterations,
                     enable_sparsity=enable_sparsity, sparsify_steps=sparsify_steps, init_ply=init_ply)
 
@@ -268,8 +265,9 @@ def scan_main(job_root: Path, scan_id: str, iterations: int = 20000,
         output_ply=filtered_ply,
         colmap_path=colmap_dir,
         overwrite=True,
-        # Looser post-cleanup (was -2.5 / 0.8 / 0.002 / 5 / 3.0).
-        min_opacity=-3.2,
+        # Post-prune near-transparent veil (logit -3.5 ≈ sigmoid 0.03;
+        # slightly above train min_opacity=0.02).
+        min_opacity=-3.5,
         max_size=1.5,
         min_size=0.001,
         min_view_count=3,

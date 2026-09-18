@@ -13,6 +13,7 @@ import argparse
 import time
 
 import combine_splats
+import filter_splats
 import partition_splat
 import convert_splat
 
@@ -42,17 +43,41 @@ def combine(job_root: Path, scan_ids: list[str], use_filtered: bool = True,
     return combined_ply_path
 
 
-def partition(combined_ply_path: Path, partition_size: float = 5.0) -> list[Path]:
-    """Partition a combined splat into tiles."""
-    print(f"[global] Partitioning with size {partition_size}m...")
-    
-    partition_paths = partition_splat.partition_splat(
-        input_path=combined_ply_path,
-        partition_size=partition_size,
-        output_dir=combined_ply_path.parent,
+def split_coarse_fine(combined_ply_path: Path) -> tuple[Path, Path]:
+    """Split combined splat into coarse (kept) and fine (remainder) LODs."""
+    global_dir = combined_ply_path.parent
+    coarse_ply = global_dir / "coarse.ply"
+    fine_ply = global_dir / "fine.ply"
+    print("[global] Splitting combined splat into coarse/fine LODs...")
+
+    filter_args = argparse.Namespace(
+        input_ply=combined_ply_path,
+        output_ply=coarse_ply,
+        output_ply_2=fine_ply,
+        opacity_space="sigmoid",
+        min_opacity=0.6,
+        min_size=0.01,
+        overwrite=True,
     )
-    
-    print(f"[global] Created {len(partition_paths)} partitions")
+    filter_splats.main(filter_args)
+
+    print(f"[global] Coarse PLY: {coarse_ply}")
+    print(f"[global] Fine PLY: {fine_ply}")
+    return coarse_ply, fine_ply
+
+
+def partition(lod_ply_path: Path, partition_size: float, base_name: str) -> list[Path]:
+    """Partition a LOD splat into tiles."""
+    print(f"[global] Partitioning {base_name} with size {partition_size}m...")
+
+    partition_paths = partition_splat.partition_splat(
+        input_path=lod_ply_path,
+        partition_size=partition_size,
+        output_dir=lod_ply_path.parent,
+        base_name=base_name,
+    )
+
+    print(f"[global] Created {len(partition_paths)} {base_name} partitions")
     return partition_paths
 
 
@@ -114,34 +139,32 @@ def main(job_root: Path, scan_ids: list[str],
     
     # Step 1: Combine splats
     combined_ply_path = combine(job_root, scan_ids, use_filtered, base_filename)
-    output_files = [combined_ply_path]
-    
-    # Step 2: Partition if requested
-    partition_count = 0
+
+    # Step 2: Split into coarse/fine LODs (Fairprice filter on combined hub)
+    coarse_ply, fine_ply = split_coarse_fine(combined_ply_path)
+
+    # Step 3: Partition each LOD if requested
+    partition_paths: list[Path] = []
     if do_partition:
-        partition_paths = partition(combined_ply_path, partition_size)
-        partition_count = len(partition_paths)
-        output_files.extend(partition_paths)
-        # TODO: Generate LOD levels
-    
-    # Step 3: Convert formats
+        partition_paths.extend(partition(coarse_ply, partition_size, "coarse"))
+        partition_paths.extend(partition(fine_ply, partition_size, "fine"))
+
+    # Step 4: Convert partition formats only (skip unpartitioned hub/LOD PLYs)
     if do_convert_splat:
-        convert_to_splat(output_files, skip_combined=do_partition,
-                         combined_ply_path=combined_ply_path)
-        #convert_aligned_scans(job_root, to_splat=True, to_sog=False)
+        convert_to_splat(partition_paths, skip_combined=False)
     
     if do_convert_sog:
-        convert_to_sog(output_files, skip_combined=do_partition,
-                       combined_ply_path=combined_ply_path)
-        #convert_aligned_scans(job_root, to_splat=False, to_sog=True)
+        convert_to_sog(partition_paths, skip_combined=False)
     
     elapsed = time.time() - start_time
     print(f"[global] Done in {elapsed:.1f}s")
     
     return {
         "combined_ply": str(combined_ply_path),
+        "coarse_ply": str(coarse_ply),
+        "fine_ply": str(fine_ply),
         "partitioned": do_partition,
-        "partition_count": partition_count,
+        "partition_count": len(partition_paths),
     }
 
 

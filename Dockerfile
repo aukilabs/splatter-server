@@ -74,7 +74,7 @@ RUN update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-14 60 && \
 
 WORKDIR /app
 
-# Build LichtFeld Studio (pin to R2-capable master; helper script vendored separately)
+# Build LichtFeld Studio (pin for train_helper recipe; helper script vendored separately)
 ARG LICHTFELD_GIT_REF=8fe40cf2190c070e6e0cbea03851b8fa8d02f32c
 RUN git clone https://github.com/microsoft/vcpkg.git
 RUN cd vcpkg && ./bootstrap-vcpkg.sh -disableMetrics
@@ -100,11 +100,11 @@ RUN python -m pip install --no-cache-dir --upgrade pip && \
 # Pipeline code
 COPY splatter_pipeline.py artifact_naming.py local_main.py global_main.py combine_splats.py convert_splat.py filter_splats.py preprocessing.py partition_splat.py /app/
 
-# R2 train helper (vendored; not yet on upstream default branch)
+# Train helper (vendored)
 COPY scripts/train_helper.sh /app/scripts/train_helper.sh
 RUN chmod +x /app/scripts/train_helper.sh
 
-# LichtFeld config params
+# LichtFeld train config (default recipe in lichtfeld_optimization_params.json)
 COPY config/lichtfeld_optimization_params.json config/lichtfeld_optimization_params_vda.json /app/config/
 
 # Legacy scripts for fallback mode if explicitly enabled

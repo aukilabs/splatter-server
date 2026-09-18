@@ -301,7 +301,7 @@ def scan_main(job_root: Path, scan_id: str, bundle_adjust: bool = False):
     if not dense_dir.exists():
         dense_dir.mkdir(parents=True, exist_ok=True)
 
-    preprocess(colmap_dir, processed_dir, frames_dir=frames_dir, bundle_adjust=True)
+    preprocess(colmap_dir, processed_dir, frames_dir=frames_dir, bundle_adjust=bundle_adjust)
     pycolmap.undistort_images(
         output_path=str(dense_dir),
         input_path=str(processed_dir),

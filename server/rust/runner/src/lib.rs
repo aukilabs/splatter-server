@@ -371,20 +371,27 @@ impl compute_runner_api::Runner for SplatterRunner {
             // Parse JSON and extract dataIDs field.
             let parsed_json: Value = match serde_json::from_slice(&bytes) {
                 Ok(v) => v,
-                Err(err) if mode == CapabilityMode::ColmapV1 => {
-                    // Backward compatibility: older colmap jobs may pass direct files
-                    // rather than a dataIDs JSON envelope.
+                Err(err)
+                    if mode == CapabilityMode::ColmapV1
+                        || (mode == CapabilityMode::LocalV1
+                            && is_direct_dataset_input(
+                                materialized.name.as_deref(),
+                                materialized.data_type.as_deref(),
+                            )) =>
+                {
+                    // Backward compatibility: colmap/local jobs may pass direct dataset
+                    // files rather than a dataIDs JSON envelope. LocalV1 derives scan_id
+                    // from artifact name/data_type (not path stem).
                     warn!(%cid, error = %err, "input cid was not a JSON envelope; skipping dataIDs parsing");
-                    if let Some(copied_path) =
-                        try_materialize_dataset_from_input_path(&materialized.path, &job_root).await?
+                    if let Some((copied_path, scan_id)) = try_materialize_dataset_from_input(
+                        &materialized.path,
+                        &job_root,
+                        materialized.name.as_deref(),
+                        materialized.data_type.as_deref(),
+                    )
+                    .await?
                     {
                         summary.datasets_downloaded += 1;
-                        let scan_id = copied_path
-                            .parent()
-                            .and_then(|p| p.parent())
-                            .and_then(|p| p.file_name())
-                            .map(|s| s.to_string_lossy().to_string())
-                            .unwrap_or_else(|| "scan".to_string());
                         if !summary.scan_ids.contains(&scan_id) {
                             summary.scan_ids.push(scan_id.clone());
                         }
@@ -393,6 +400,7 @@ impl compute_runner_api::Runner for SplatterRunner {
                                 "level": "info",
                                 "message": "materialized direct dataset input",
                                 "cid": cid.as_str(),
+                                "scan_id": scan_id,
                                 "path": copied_path.display().to_string(),
                             }))
                             .await?;
@@ -1388,34 +1396,79 @@ fn is_recording_input(data_type: &str, name: &str) -> bool {
         || n.contains("recording")
 }
 
-async fn try_materialize_dataset_from_input_path(
-    input_path: &Path,
+fn is_refined_scan_input(data_type: &str, name: &str) -> bool {
+    data_type == "refined_scan_zip" || name.starts_with("refined_scan_")
+}
+
+fn is_direct_dataset_input(name: Option<&str>, data_type: Option<&str>) -> bool {
+    let name = name.filter(|n| !n.is_empty()).unwrap_or("");
+    let data_type = data_type.unwrap_or("");
+    is_recording_input(data_type, name) || is_refined_scan_input(data_type, name)
+}
+
+fn scan_id_from_dataset_artifact(name: Option<&str>, data_type: Option<&str>) -> Option<String> {
+    let name = name.filter(|n| !n.is_empty())?;
+    let data_type = data_type.unwrap_or("");
+    if is_recording_input(data_type, name) {
+        return Some(normalize_scan_id(name.trim_start_matches("dmt_recording_")));
+    }
+    if is_refined_scan_input(data_type, name) {
+        return Some(normalize_scan_id(name.trim_start_matches("refined_scan_")));
+    }
+    None
+}
+
+fn dataset_dest_path(
     job_root: &Path,
-) -> Result<Option<PathBuf>> {
+    scan_id: &str,
+    name: Option<&str>,
+    data_type: Option<&str>,
+    input_path: &Path,
+) -> Option<PathBuf> {
+    let name = name.filter(|n| !n.is_empty()).unwrap_or("");
+    let data_type = data_type.unwrap_or("");
+    if is_recording_input(data_type, name) {
+        return Some(job_root.join("datasets").join(scan_id).join("Frames.mp4"));
+    }
+    if is_refined_scan_input(data_type, name) {
+        return Some(job_root.join("datasets").join(scan_id).join("RefinedScan.zip"));
+    }
+
+    // Colmap legacy: infer from file extension when name/type are unavailable.
     let ext = input_path
         .extension()
         .and_then(|s| s.to_str())
         .unwrap_or("")
         .to_ascii_lowercase();
-    let scan_id = input_path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .map(normalize_scan_id)
-        .unwrap_or_else(|| "scan".to_string());
-
-    let dest = if ext == "mp4" {
-        job_root.join("datasets").join(scan_id).join("Frames.mp4")
+    if ext == "mp4" {
+        Some(job_root.join("datasets").join(scan_id).join("Frames.mp4"))
     } else if ext == "zip" {
-        job_root.join("datasets").join(scan_id).join("RefinedScan.zip")
+        Some(job_root.join("datasets").join(scan_id).join("RefinedScan.zip"))
     } else {
+        None
+    }
+}
+
+async fn try_materialize_dataset_from_input(
+    input_path: &Path,
+    job_root: &Path,
+    name: Option<&str>,
+    data_type: Option<&str>,
+) -> Result<Option<(PathBuf, String)>> {
+    let scan_id = scan_id_from_dataset_artifact(name, data_type).or_else(|| {
+        input_path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .map(normalize_scan_id)
+    }).unwrap_or_else(|| "scan".to_string());
+    let Some(dest) = dataset_dest_path(job_root, &scan_id, name, data_type, input_path) else {
         return Ok(None);
     };
-
     if let Some(parent) = dest.parent() {
         tokio::fs::create_dir_all(parent).await?;
     }
     tokio::fs::copy(input_path, &dest).await?;
-    Ok(Some(dest))
+    Ok(Some((dest, scan_id)))
 }
 
 async fn materialize_colmap_binaries(

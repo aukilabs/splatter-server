@@ -174,8 +174,9 @@ def run_colmap_single_splat(job_root: Path, iterations: int, enable_sparsity: bo
         output_ply=filtered_ply,
         colmap_path=colmap_sparse,
         overwrite=True,
-        # Looser post-cleanup (was -2.2 / 5 / 3.0).
-        min_opacity=-3.0,  # logits; keep more low-alpha gaussians
+        # Post-prune near-transparent veil (logit -3.5 ≈ sigmoid 0.03;
+        # slightly above train min_opacity=0.02).
+        min_opacity=-3.5,
         #max_size=10.0,
         #min_size=0.001,
         min_view_count=3,
@@ -242,7 +243,7 @@ def run_local_only(
 
     _progress("postprocessing", 90, "staging outputs")
     output_dir = job_root / "output"
-    # Local R2 helper ignores sparsity; artifact names use iterations only.
+    # Local train_helper ignores sparsity; artifact names use iterations only.
     produced = []
     for scan_id in scan_ids:
         splat_dir = job_root / "refined" / "local" / scan_id / "splat"
@@ -309,8 +310,15 @@ def run_global_only(
                 raise ValueError(
                     "manifest_timestamp is required to stage SOG partition outputs"
                 )
+            lod_level = None
+            if f.name.startswith("coarse_partition_"):
+                lod_level = "coarse"
+            elif f.name.startswith("fine_partition_"):
+                lod_level = "fine"
             dest_name = rename_for_domain_upload(
-                f.name, manifest_timestamp=manifest_timestamp
+                f.name,
+                manifest_timestamp=manifest_timestamp,
+                lod_level=lod_level,
             )
             if dest_name:
                 stage_output(output_dir, f, dest_name)
@@ -337,7 +345,7 @@ def main() -> None:
     parser.add_argument("--no_use_filtered", action="store_true", default=False)
     parser.add_argument("--partition", action="store_true", default=True)
     parser.add_argument("--no_partition", action="store_true", default=False)
-    parser.add_argument("--partition_size", type=float, default=2.0)
+    parser.add_argument("--partition_size", type=float, default=5.0)
     parser.add_argument("--convert_to_splat", action="store_true", default=True)
     parser.add_argument("--no_convert_to_splat", action="store_true", default=False)
     parser.add_argument("--convert_to_sog", action="store_true", default=False)

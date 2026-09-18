@@ -1,8 +1,31 @@
-FROM splatter-server:latest
+# Fast rebuild of product bits on top of an existing splatter-server image
+# (avoids re-building LichtFeld / vcpkg). Use when only pipeline/helper/config/Rust change.
+#
+#   docker build -f Dockerfile.r2-overlay -t splatter-server:r2 -t splatter-server:latest .
+
+ARG BASE_IMAGE=splatter-server:latest
+ARG SPLATTER_VERSION=0.0.0-local
+
+FROM --platform=$BUILDPLATFORM rust:1.89-bullseye AS rust-build
+ARG SPLATTER_VERSION
+ENV SPLATTER_VERSION="${SPLATTER_VERSION}"
+WORKDIR /app
+COPY server/rust/ server/rust/
+RUN cargo build --release -p splatter-bin --manifest-path server/rust/Cargo.toml
+
+FROM ${BASE_IMAGE}
 USER root
+
+COPY --from=rust-build /app/server/rust/target/release/splatter-bin /app/splatter
+
+COPY splatter_pipeline.py artifact_naming.py local_main.py global_main.py \
+     combine_splats.py convert_splat.py filter_splats.py preprocessing.py \
+     partition_splat.py CAPABILITIES.md /app/
+
 COPY scripts/train_helper.sh /app/scripts/train_helper.sh
-COPY local_main.py /app/local_main.py
-COPY CAPABILITIES.md /app/CAPABILITIES.md
-RUN chmod +x /app/scripts/train_helper.sh \
+COPY config/lichtfeld_optimization_params.json config/lichtfeld_optimization_params_vda.json /app/config/
+
+RUN chmod +x /app/scripts/train_helper.sh /app/splatter \
     && sed -i "s/\r$//" /app/scripts/train_helper.sh
+
 USER 1000:1000
