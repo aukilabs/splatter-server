@@ -255,12 +255,20 @@ impl compute_runner_api::Runner for SplatterRunner {
             // Parse JSON and extract dataIDs field.
             let parsed_json: Value = match serde_json::from_slice(&bytes) {
                 Ok(v) => v,
-                Err(err) if mode == CapabilityMode::ColmapV1 => {
-                    // Backward compatibility: older colmap jobs may pass direct files
-                    // rather than a dataIDs JSON envelope.
+                Err(err)
+                    if mode == CapabilityMode::ColmapV1
+                        || mode == CapabilityMode::LocalV1 =>
+                {
+                    // Backward compatibility: colmap/local jobs may pass direct files
+                    // rather than a dataIDs JSON envelope (refinement-style inputsCids).
                     warn!(%cid, error = %err, "input cid was not a JSON envelope; skipping dataIDs parsing");
-                    if let Some(copied_path) =
-                        try_materialize_dataset_from_input_path(&materialized.path, &job_root).await?
+                    if let Some(copied_path) = try_materialize_dataset_from_materialized(
+                        &materialized.path,
+                        materialized.data_type.as_deref(),
+                        materialized.name.as_deref(),
+                        &job_root,
+                    )
+                    .await?
                     {
                         summary.datasets_downloaded += 1;
                         let scan_id = copied_path
@@ -1045,8 +1053,10 @@ fn is_recording_input(data_type: &str, name: &str) -> bool {
         || n.contains("recording")
 }
 
-async fn try_materialize_dataset_from_input_path(
+async fn try_materialize_dataset_from_materialized(
     input_path: &Path,
+    data_type: Option<&str>,
+    name: Option<&str>,
     job_root: &Path,
 ) -> Result<Option<PathBuf>> {
     let ext = input_path
@@ -1054,16 +1064,35 @@ async fn try_materialize_dataset_from_input_path(
         .and_then(|s| s.to_str())
         .unwrap_or("")
         .to_ascii_lowercase();
-    let scan_id = input_path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .map(normalize_scan_id)
-        .unwrap_or_else(|| "scan".to_string());
+    let dt = data_type.unwrap_or("").to_ascii_lowercase();
+    let n = name.unwrap_or("").to_ascii_lowercase();
 
-    let dest = if ext == "mp4" {
-        job_root.join("datasets").join(scan_id).join("Frames.mp4")
-    } else if ext == "zip" {
-        job_root.join("datasets").join(scan_id).join("RefinedScan.zip")
+    let is_mp4 = ext == "mp4" || is_recording_input(data_type.unwrap_or(""), name.unwrap_or(""));
+    let is_zip = ext == "zip"
+        || dt == "refined_scan_zip"
+        || n.starts_with("refined_scan_");
+
+    let scan_id = if is_mp4 {
+        normalize_scan_id(
+            name
+                .unwrap_or("")
+                .trim_start_matches("dmt_recording_")
+                .trim_end_matches(".mp4"),
+        )
+    } else if is_zip {
+        normalize_scan_id(name.unwrap_or("").trim_start_matches("refined_scan_"))
+    } else {
+        input_path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .map(normalize_scan_id)
+            .unwrap_or_else(|| "scan".to_string())
+    };
+
+    let dest = if is_mp4 {
+        job_root.join("datasets").join(&scan_id).join("Frames.mp4")
+    } else if is_zip {
+        job_root.join("datasets").join(&scan_id).join("RefinedScan.zip")
     } else {
         return Ok(None);
     };
