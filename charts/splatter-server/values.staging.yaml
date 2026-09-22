@@ -1,4 +1,9 @@
 splatter-server:
+  # Keep long-running training jobs off Spot and out of voluntary consolidation.
+  nodeSelector:
+    karpenter.sh/capacity-type: on-demand
+  podAnnotations:
+    karpenter.sh/do-not-disrupt: "true"
   image:
     tag: v0.1.0
     pullPolicy: IfNotPresent
