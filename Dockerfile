@@ -74,8 +74,9 @@ RUN update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-14 60 && \
 
 WORKDIR /app
 
-# Build LichtFeld Studio (pin for train_helper recipe; helper script vendored separately)
-ARG LICHTFELD_GIT_REF=8fe40cf2190c070e6e0cbea03851b8fa8d02f32c
+# Build LichtFeld Studio (pin must include FastGS L_d + s6 geo recipe).
+# Default: 3693dfb73. Override --build-arg once that commit is on the clone remote.
+ARG LICHTFELD_GIT_REF=3693dfb737312495fc536b7e53fe88c51c127226
 RUN git clone https://github.com/microsoft/vcpkg.git
 RUN cd vcpkg && ./bootstrap-vcpkg.sh -disableMetrics
 RUN git clone --recursive https://github.com/MrNeRF/LichtFeld-Studio
@@ -100,11 +101,12 @@ RUN python -m pip install --no-cache-dir --upgrade pip && \
 # Pipeline code
 COPY splatter_pipeline.py artifact_naming.py local_main.py global_main.py combine_splats.py convert_splat.py filter_splats.py preprocessing.py partition_splat.py /app/
 
-# Train helper (vendored)
-COPY scripts/train_helper.sh /app/scripts/train_helper.sh
-RUN chmod +x /app/scripts/train_helper.sh
+# Train helper + crop-fit (vendored; recipe in config JSON)
+COPY scripts/train_helper.sh scripts/auto_fit_cropbox.py /app/scripts/
+RUN chmod +x /app/scripts/train_helper.sh \
+    && sed -i "s/\r$//" /app/scripts/train_helper.sh /app/scripts/auto_fit_cropbox.py
 
-# LichtFeld train config (default recipe in lichtfeld_optimization_params.json)
+# LichtFeld train config (s6_ld50 geo recipe in lichtfeld_optimization_params.json)
 COPY config/lichtfeld_optimization_params.json config/lichtfeld_optimization_params_vda.json /app/config/
 
 # Legacy scripts for fallback mode if explicitly enabled

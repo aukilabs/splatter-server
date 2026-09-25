@@ -164,7 +164,8 @@ def train_splat(colmap_dir: Path, output_dir: Path, images_dir: Path = None,
 
     if use_train_helper:
         # train_helper path: sparsity and VDA --init unsupported; recipe is
-        # config/lichtfeld_optimization_params.json via train_helper.sh.
+        # s6_ld50 geo (config + helper CLI). L_d CLI skipped until image binary
+        # supports --use-depth-distortion (helper default --ld 0).
         if enable_sparsity:
             print(
                 "[train_splat] enable_sparsity ignored on train_helper path",
@@ -182,6 +183,7 @@ def train_splat(colmap_dir: Path, output_dir: Path, images_dir: Path = None,
             LICHTFELD_TRAIN_HELPER,
             "-i", str(iterations),
             "-r", "2",
+            "--ld", "0",
             str(scene_dir),
             str(output_dir),
         ]

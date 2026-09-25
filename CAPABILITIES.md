@@ -2,9 +2,55 @@
 
 This document defines the runtime contract for the splatter capabilities implemented by the Rust runner.
 
+## Trainer recipe (local + colmap) — s6_ld50 geo
+
+Locked 2026-09-25 (LichtFeld LEP A/B + visual):
+
+| Knob | Value |
+|---|---|
+| Strategy | `mrnf` / FastGS, `max_cap=1M` |
+| Depth prior (SSI) | weight **0.15** (built-in exponential decay → 2% by last iter) |
+| Depth distortion \(L_d\) | **50** (locked; **CLI skipped on nodes** until binary ≥ `3693dfb73`) |
+| NC / flatten / prior normals | **0.01** / **0.5** / **0.05** |
+| `normal_start_fraction` | **0.03** |
+| Opacity LR / reg | **0.006** / **0.0015** |
+| Scale reg / decay | **0.001** / **0.002** |
+| `min_opacity` (train) | ≈ **0.004** |
+| `max_screen_share` / oversize split | **0.2** / **0.25** |
+| Exposure | **off** (helper `--exposure` opt-in) |
+| Preprocess (in helper) | MoGe-2 **depth + normals** (`LichtFeld-Studio preprocess --mode both`) |
+| Crop | `scripts/auto_fit_cropbox.py` (trimmed); `--no-crop` to skip |
+
+Recipe sources: `config/lichtfeld_optimization_params.json` + `scripts/train_helper.sh`.
+Product calls pass `--ld 0` so pre-L_d binaries keep working; config still records Ld=50. Enable with `--ld 50` after a full image rebuild that pins LichtFeld ≥ `3693dfb73` (`--use-depth-distortion`).
+
+**Post-filter** (unchanged product cleanup): opacity prune logit `-3.5` (≈0.03). That is above train `min_opacity`; it still strips floaters after the softer train floor.
+
+## Preprocessing: Splattr vs MoGe (how they fit)
+
+Two separate stages — **do not conflate**:
+
+1. **`preprocessing.py` (Splattr / COLMAP path)**  
+   Runs *before* train on refined scans: optional BA, undistort into `dense/`, statistical/radius outlier cleanup on sparse points, camera culling (too few close points / black / blur).  
+   **Does not** write monocular depth or normals. It prepares a clean COLMAP scene for LichtFeld.
+
+2. **`train_helper.sh` MoGe-2**  
+   Runs *at train start* on `<scene>/images`: writes `depths/` + `normals/` (or Studio’s expected layout) used by SSI depth prior + normal losses.  
+   **\(L_d\) does not need depth maps** (per-ray FastGS variance), but NC / flatten / prior normals / SSI depth **do**.
+
+### Recommendations
+
+- **Always keep MoGe in the helper** for this recipe. Skipping it silences depth/normal losses while leaving weights enabled (wasted compute / weaker geo).
+- **Keep Splattr camera/point cleanup** — it improves SfM quality and which views train; complementary to MoGe.
+- **Prefer SSI depth at 0.15** (current). Higher priors (0.2–2.0) can bend monodepth bias into the splat; the built-in decay already softens late training.
+- **Do not replace MoGe with VDA on the helper path** — `use_vda` / `--init` are ignored when `use_train_helper=True`. VDA remains a legacy/direct-Studio path only.
+- **Bake MoGe weights** in the image (`~/.lichtfeld/onnx/` / release `.lfw`) so GPU nodes need no egress.
+- **Undistorted images** from Splattr must stay the ones MoGe sees (`dense/images` → helper scene `images/`). Mixing distorted frames with COLMAP poses hurts both SfM and SSI.
+- If MoGe fails on a subset of frames, LichtFeld logs cameras-without-depth; recipe still runs but geo terms weaken on those views — fix coverage rather than raising depth weight.
+
 ## Capability: `/splatter/colmap/v1`
 
-- **Trainer**: `scripts/train_helper.sh` (same recipe as local: `-i` default 20000, `-r 2`; recipe in `config/lichtfeld_optimization_params.json` including anti-haze `min_opacity=0.02` / `scale_reg=0.01` / `scale_decay=0.003` / `oversize_split_fraction=0.25`; exports `ply,sog`). Sparsity flag is accepted but ignored on the helper path. Post-filter opacity prune logit `-3.5` (≈0.03; slightly above train `min_opacity=0.02`).
+- **Trainer**: `scripts/train_helper.sh` (same recipe as local: `-i` default 20000, `-r 2`; s6_ld50 geo in `config/lichtfeld_optimization_params.json`; exports `ply,sog`). Sparsity flag is accepted but ignored on the helper path. Post-filter opacity prune logit `-3.5` (≈0.03).
 - **Status**: Backward-compatible required output kept.
 - **Input expectation**:
   - Task input CID points to a manifest JSON containing `dataIDs`.
@@ -20,7 +66,7 @@ This document defines the runtime contract for the splatter capabilities impleme
 
 ## Capability: `/splatter/local/v1`
 
-- **Trainer**: `scripts/train_helper.sh` (`-i` default 20000, `-r 2`; same `config/lichtfeld_optimization_params.json` as colmap; exports `ply,sog`). Post-filter opacity prune logit `-3.5` (≈0.03; slightly above train `min_opacity=0.02`).
+- **Trainer**: `scripts/train_helper.sh` (`-i` default 20000, `-r 2`; same s6_ld50 config as colmap; exports `ply,sog`). Post-filter opacity prune logit `-3.5` (≈0.03).
 - **Input expectation** (preferred: direct dataset URLs):
   - **Direct inputs**: `inputsCids` may list full domain data URLs — one or more `dmt_recording_<scan_id>` (`data_type=dmt_recording_mp4`) and matching `refined_scan_<scan_id>` (`data_type=refined_scan_zip`) per scan. The runner stages them under `datasets/<scan_id>/Frames.mp4` and `datasets/<scan_id>/RefinedScan.zip`. Scan folder id is derived from **artifact name / data_type** (not the on-disk path stem). No `local_splat_input_*` envelope is required.
   - **Legacy envelope**: a task input CID may still point to a manifest JSON `{ "dataIDs": [ ... ] }` listing UUIDs or artifact names.
@@ -57,4 +103,3 @@ This document defines the runtime contract for the splatter capabilities impleme
   - Local PLY handoff expects `splat_<iterations>.filtered.ply` (default iterations: 20000).
 - **Notes**:
   - Combined unpartitioned `combined_splat.ply` is not uploaded by default.
-

@@ -56,7 +56,8 @@ WORKDIR /app
 
 RUN git clone https://github.com/microsoft/vcpkg.git
 RUN cd vcpkg && ./bootstrap-vcpkg.sh -disableMetrics
-ARG LICHTFELD_GIT_REF=8fe40cf2190c070e6e0cbea03851b8fa8d02f32c
+# Must include FastGS L_d (e40b205cd) + locked s6 config (3693dfb73).
+ARG LICHTFELD_GIT_REF=3693dfb737312495fc536b7e53fe88c51c127226
 RUN git clone --recursive https://github.com/MrNeRF/LichtFeld-Studio
 RUN cd LichtFeld-Studio && git checkout "${LICHTFELD_GIT_REF}" && git submodule update --init --recursive
 RUN apt-get update && apt-get install -y --no-install-recommends libgtk-3-dev && rm -rf /var/lib/apt/lists/*
@@ -141,10 +142,11 @@ RUN python -m pip install --no-cache-dir --upgrade pip && \
 COPY splatter_pipeline.py artifact_naming.py local_main.py global_main.py combine_splats.py convert_splat.py filter_splats.py preprocessing.py partition_splat.py /app/
 
 # R2 train helper (vendored; not yet on upstream default branch)
-COPY scripts/train_helper.sh /app/scripts/train_helper.sh
-RUN chmod +x /app/scripts/train_helper.sh
+COPY scripts/train_helper.sh scripts/auto_fit_cropbox.py /app/scripts/
+RUN chmod +x /app/scripts/train_helper.sh \
+    && sed -i "s/\r$//" /app/scripts/train_helper.sh /app/scripts/auto_fit_cropbox.py
 
-# LichtFeld config params
+# LichtFeld config params (s6_ld50 geo recipe)
 COPY config/lichtfeld_optimization_params.json config/lichtfeld_optimization_params_vda.json /app/config/
 
 # Legacy scripts for fallback mode if explicitly enabled

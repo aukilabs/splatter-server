@@ -20,12 +20,14 @@ COPY --from=rust-build /app/server/rust/target/release/splatter-bin /app/splatte
 
 COPY splatter_pipeline.py artifact_naming.py local_main.py global_main.py \
      combine_splats.py convert_splat.py filter_splats.py preprocessing.py \
-     partition_splat.py CAPABILITIES.md /app/
+     partition_splat.py /app/
 
-COPY scripts/train_helper.sh /app/scripts/train_helper.sh
+COPY scripts/train_helper.sh scripts/auto_fit_cropbox.py /app/scripts/
 COPY config/lichtfeld_optimization_params.json config/lichtfeld_optimization_params_vda.json /app/config/
 
 RUN chmod +x /app/scripts/train_helper.sh /app/splatter \
-    && sed -i "s/\r$//" /app/scripts/train_helper.sh
+    && sed -i "s/\r$//" /app/scripts/train_helper.sh /app/scripts/auto_fit_cropbox.py
+# Note: overlay does NOT rebuild LichtFeld. Product path defaults to --ld 0
+# until a full Dockerfile rebuild pins LichtFeld >= 3693dfb73 (L_d CLI).
 
 USER 1000:1000

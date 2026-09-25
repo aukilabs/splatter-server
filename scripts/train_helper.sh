@@ -1,25 +1,30 @@
 #!/usr/bin/env bash
-# train_helper.sh - preprocess + train with the default LichtFeld recipe.
+# train_helper.sh - preprocess + train with the locked geo recipe (s6_ld50 lineage).
 #
-# Vendored for splatter-server Docker. Synced from LichtFeld-Studio train_helper.
+# Vendored for splatter-server Docker. Synced from LichtFeld-Studio train_helper
+# (locked 2026-09-25 after fair A/B + visual check):
+#   FastGS / mrnf / max_cap=1M / exposure off (opt-in via --exposure)
+#   NC=0.01 / flatten=0.5 / prior normals=0.05 / depth SSI=0.15 / Ld=50
+#   opacity_lr=0.006 / opacity_reg=0.0015 / scale_reg=0.001
+#   max_screen_share=0.2 / oversize_split=0.25 / normal_start=0.03
+#   Config: config/lichtfeld_optimization_params.json
+#   Auto crop: scripts/auto_fit_cropbox.py (optional; --no-crop to skip)
 #
-# Recipe lives in config/lichtfeld_optimization_params.json:
-#   mrnf / max_cap=1M / SH2 / random bg
-#   NC=0.1 / flatten=0.2 / prior normals=0.1 / depth SSI=0.4
-#   min_opacity=0.02 / scale_reg=0.01 / scale_decay=0.003 / oversize_split=0.25
-#   use_exposure_correction on
-# CLI only for runtime paths + overrides that depend on -i / -r / export.
+# Node note (2026-09-25): default skips L_d CLI until the image binary is rebuilt
+# with --use-depth-distortion (LichtFeld >= 3693dfb73). Pass --ld 50 to enable.
 #
 # Usage:
 #   train_helper.sh <scene> <out>
-#   train_helper.sh -i 20000 <scene> <out>
 #   train_helper.sh -i 20000 -r 2 <scene> <out>
+#   train_helper.sh --no-crop <scene> <out>
+#   train_helper.sh --ld 0 <scene> <out>
+#   train_helper.sh --ld 50 <scene> <out>
 #
 # Optional env:
-#   LFS_EXE, LICHTFELD_BIN  path to LichtFeld-Studio binary
-#   LFS_ROOT                LichtFeld source tree (default: /app/LichtFeld-Studio)
-#   LFS_PYTHON              Python interpreter for optional results summary
-#   LICHTFELD_CONFIG        train JSON (default: ../config/lichtfeld_optimization_params.json)
+#   LFS_EXE / LICHTFELD_BIN  path to LichtFeld-Studio binary
+#   LFS_ROOT                 LichtFeld tree (default: /app/LichtFeld-Studio)
+#   LFS_PYTHON               Python for optional results summary
+#   LICHTFELD_CONFIG         train JSON (default: ../config/lichtfeld_optimization_params.json)
 
 set -euo pipefail
 
@@ -27,12 +32,16 @@ HELPER_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LFS_ROOT="${LFS_ROOT:-/app/LichtFeld-Studio}"
 
 usage() {
-  echo "usage: $0 [-i iterations] [-r resize_factor] <scene> <out>" >&2
+  echo "usage: $0 [-i iterations] [-r resize] [--exposure] [--no-crop] [--ld WEIGHT] <scene> <out>" >&2
   exit 2
 }
 
 ITERATIONS=30000
 RESIZE_FACTOR=2
+EXPOSURE=0
+USE_CROP=1
+# Empty / 0 = omit L_d CLI (compatible with pre-L_d binaries). Locked recipe is 50.
+LD_WEIGHT="0"
 SCENE=""
 OUT=""
 
@@ -46,6 +55,19 @@ while [[ $# -gt 0 ]]; do
     -r|--resize_factor)
       [[ $# -ge 2 ]] || usage
       RESIZE_FACTOR="$2"
+      shift 2
+      ;;
+    --exposure|--exposure-correction)
+      EXPOSURE=1
+      shift
+      ;;
+    --no-crop)
+      USE_CROP=0
+      shift
+      ;;
+    --ld|--depth-distortion-weight)
+      [[ $# -ge 2 ]] || usage
+      LD_WEIGHT="$2"
       shift 2
       ;;
     -h|--help)
@@ -75,11 +97,13 @@ if ! [[ "${ITERATIONS}" =~ ^[0-9]+$ ]] || [[ "${ITERATIONS}" -le 0 ]]; then
   exit 2
 fi
 
-if [[ -n "${RESIZE_FACTOR}" ]] && ! [[ "${RESIZE_FACTOR}" =~ ^[0-9]+$ ]]; then
+if ! [[ "${RESIZE_FACTOR}" =~ ^[0-9]+$ ]]; then
   echo "error: resize_factor must be a positive integer (got: ${RESIZE_FACTOR})" >&2
   exit 2
 fi
 
+CONFIG="${LICHTFELD_CONFIG:-${HELPER_DIR}/../config/lichtfeld_optimization_params.json}"
+CROP_PY="${HELPER_DIR}/auto_fit_cropbox.py"
 SUMMARY_PY="${LFS_ROOT}/scripts/train_helper_summary.py"
 
 resolve_exe() {
@@ -134,22 +158,33 @@ if [[ ! -d "${SCENE}/images" ]]; then
   exit 1
 fi
 
-mkdir -p "${OUT}"
-
-echo "==> preprocess (MoGe-2 depth + normals)"
-echo "    scene=${SCENE}"
-"${EXE}" preprocess "${SCENE}" --mode both
-
-CONFIG="${LICHTFELD_CONFIG:-${HELPER_DIR}/../config/lichtfeld_optimization_params.json}"
 if [[ ! -f "${CONFIG}" ]]; then
   echo "error: train config missing: ${CONFIG}" >&2
   echo "       set LICHTFELD_CONFIG or place lichtfeld_optimization_params.json under config/" >&2
   exit 1
 fi
 
-echo "==> train"
-echo "    iters=${ITERATIONS}  out=${OUT}"
-echo "    resize_factor=${RESIZE_FACTOR}"
+mkdir -p "${OUT}"
+
+echo "==> preprocess (MoGe-2 depth + normals)"
+echo "    scene=${SCENE}"
+"${EXE}" preprocess "${SCENE}" --mode both
+
+if [[ "${EXPOSURE}" -eq 1 ]]; then
+  EXPOSURE_LABEL=on
+else
+  EXPOSURE_LABEL=off
+fi
+
+if [[ -z "${LD_WEIGHT}" || "${LD_WEIGHT}" == "0" || "${LD_WEIGHT}" == "0.0" ]]; then
+  LD_LABEL="off (deferred until L_d binary)"
+else
+  LD_LABEL="${LD_WEIGHT}"
+fi
+
+echo "==> train geo recipe (s6_ld50 lineage)"
+echo "    iters=${ITERATIONS}  resize=${RESIZE_FACTOR}  out=${OUT}"
+echo "    NC=0.01 flatten=0.5 prior_normals=0.05 depth_ssi=0.15 Ld=${LD_LABEL} exposure=${EXPOSURE_LABEL}"
 echo "    config=${CONFIG}"
 echo "    export=ply,sog"
 
@@ -160,12 +195,42 @@ TRAIN_CMD=(
   --config "${CONFIG}"
   -d "${SCENE}"
   -o "${OUT}"
+  --strategy mrnf
+  --max-cap 1000000
   -i "${ITERATIONS}"
   -r "${RESIZE_FACTOR}"
+  --eval
   --eval-steps "${ITERATIONS}"
-  --export ply,sog
+  --export "ply,sog"
+  --use-normal-loss
+  --normal-loss-weight 0.05
+  --normal-consistency-weight 0.01
+  --normal-flatten-weight 0.5
+  --normal-start-fraction 0.03
+  --use-depth-loss
+  --depth-loss-mode ssi
+  --depth-loss-weight 0.15
+  --max-screen-share 0.2
+  --oversize-split-fraction 0.25
   --quiet
 )
+
+# Only emit L_d CLI when weight > 0 (requires binary with --use-depth-distortion).
+if [[ -n "${LD_WEIGHT}" && "${LD_WEIGHT}" != "0" && "${LD_WEIGHT}" != "0.0" ]]; then
+  TRAIN_CMD+=(--use-depth-distortion --depth-distortion-weight "${LD_WEIGHT}")
+fi
+
+if [[ "${EXPOSURE}" -eq 1 ]]; then
+  TRAIN_CMD+=(--exposure-correction)
+fi
+
+if [[ "${USE_CROP}" -eq 1 ]]; then
+  if [[ -f "${CROP_PY}" ]]; then
+    TRAIN_CMD+=(--python-script "${CROP_PY}")
+  else
+    echo "warning: crop script missing (${CROP_PY}); training without auto crop" >&2
+  fi
+fi
 
 "${TRAIN_CMD[@]}"
 
@@ -179,7 +244,7 @@ else
     --out-dir "${OUT}" \
     --iterations "${ITERATIONS}" \
     --executable "${EXE}" \
-    --arm default
+    --arm geo
   SUMMARY_RC=$?
   set -e
   if [[ "${SUMMARY_RC}" -ne 0 ]]; then
