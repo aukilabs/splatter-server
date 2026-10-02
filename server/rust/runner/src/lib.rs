@@ -1,13 +1,13 @@
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
-use posemesh_compute_node::engine::RunnerRegistry;
-use posemesh_compute_node::telemetry;
-use posemesh_compute_node_runner_api as compute_runner_api;
-use posemesh_domain_http::domain_data::{download_by_id, download_metadata_v1, DownloadQuery};
+use node_host::auki_sdk::DataListQuery;
+use node_host::{
+    telemetry, ArtifactContent, ArtifactRequest, NodeRunner, Router, TaskContext, TaskIo,
+};
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::env;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Instant;
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -18,9 +18,9 @@ use uuid::Uuid;
 /// Capability advertised to DDS/DMS.
 pub const CAPABILITY: &str = "/splatter/colmap/v1";
 
-/// Returns a registry populated with the hello runner.
-pub fn registry() -> RunnerRegistry {
-    RunnerRegistry::new().register(HelloRunner)
+/// Returns a router populated with the splatter runner.
+pub fn registry() -> Router {
+    Router::new().register(HelloRunner)
 }
 
 pub struct HelloRunner;
@@ -32,25 +32,23 @@ fn tasks_cleanup_disabled() -> bool {
     }
 }
 
-/// Extract (domain_server_base, domain_id) from a full data CID URL.
-fn parse_domain_from_cid(cid: &str) -> Option<(String, String)> {
-    // Expect form: https://domain-server/api/v1/domains/{domain_id}/data/{data_id}
-    let prefix = "/api/v1/domains/";
-    let pos = cid.find(prefix)?;
-    let base = cid[..pos].to_string();
-    let rest = &cid[pos + prefix.len()..];
-    let mut parts = rest.splitn(2, '/');
-    let domain_id = parts.next()?.to_string();
-    Some((base, domain_id))
+/// Stream a Domain item to `dest`; a failed transfer leaves no partial file behind.
+async fn download_item(io: &TaskIo, id: Uuid, size: u64, dest: &Path) -> Result<u64> {
+    let result = io.download_to(id, size, dest).await;
+    if result.is_err() {
+        let _ = tokio::fs::remove_file(dest).await;
+        if let Some(parent) = dest.parent() {
+            // Only removes the directory when the failed file was its sole entry.
+            let _ = tokio::fs::remove_dir(parent).await;
+        }
+    }
+    result
 }
 
 const TASK_CANCELLED_PREFIX: &str = "task cancelled";
 
-async fn ensure_task_not_cancelled(
-    ctx: &compute_runner_api::TaskCtx<'_>,
-    stage: &str,
-) -> Result<()> {
-    if ctx.ctrl.is_cancelled().await {
+fn ensure_task_not_cancelled(task: &TaskContext, stage: &str) -> Result<()> {
+    if task.is_cancelled() {
         return Err(anyhow!("{TASK_CANCELLED_PREFIX}: {stage}"));
     }
     Ok(())
@@ -62,62 +60,53 @@ fn is_task_cancelled_error(err: &anyhow::Error) -> bool {
 }
 
 #[async_trait]
-impl compute_runner_api::Runner for HelloRunner {
+impl NodeRunner for HelloRunner {
     fn capability(&self) -> &'static str {
         CAPABILITY
     }
 
-    async fn run(&self, ctx: compute_runner_api::TaskCtx<'_>) -> Result<()> {
-        let lease = ctx.lease;
+    async fn run(&self, task: &TaskContext, io: &TaskIo) -> Result<()> {
+        let spec = &task.task;
+        let domain_id = io.domain_id();
 
         // Attach common task identifiers to every tracing event emitted in this task.
         let task_span = telemetry::task_span(
-            lease.task.id,
-            lease.task.job_id.unwrap_or_else(Uuid::nil),
-            &lease.task.capability,
-            lease.domain_id.unwrap_or_else(Uuid::nil),
+            spec.id,
+            spec.job_id.unwrap_or_else(Uuid::nil),
+            &spec.capability,
+            domain_id,
         );
         let _span_guard = task_span.enter();
 
-        let client_id =
-            std::env::var("POSEMESH_CLIENT_ID").unwrap_or_else(|_| "splatter-runner".into());
         let mut refined_suffix: Option<String> = None;
-        let mut colmap_refs: HashMap<String, (String, String)> = HashMap::new();
-        let mut domain_base_from_input: Option<String> =
-            lease.domain_server_url.as_ref().map(|u| u.to_string());
-        let mut domain_id_from_input: Option<String> = lease.domain_id.map(|d| d.to_string());
+        let mut colmap_refs: HashMap<String, (Uuid, u64)> = HashMap::new();
         // Resolve task workspace root; default is relative "tasks" for local dev,
         // but Docker image sets TASKS_ROOT=/app/tasks to avoid cwd/permission issues.
         let task_root = env::var("TASKS_ROOT").unwrap_or_else(|_| "tasks".to_string());
-        let job_root = PathBuf::from(task_root).join(lease.task.id.to_string());
+        let job_root = PathBuf::from(task_root).join(spec.id.to_string());
         tokio::fs::create_dir_all(&job_root)
             .await
             .with_context(|| format!("create job root {}", job_root.display()))?;
         let datasets_dir = job_root.join("datasets");
 
         let task_result: Result<()> = async {
-            ensure_task_not_cancelled(&ctx, "before execution").await?;
-            ctx.ctrl
-                .progress(json!({
-                    "pct": 5,
-                    "stage": "workspace",
-                    "status": "prepared",
-                    "job_root": job_root.display().to_string(),
-                }))
-                .await?;
-            let _ = ctx
-                .ctrl
-                .log_event(json!({
-                    "level": "info",
-                    "stage": "workspace",
-                    "message": "workspace prepared",
-                    "task_id": lease.task.id,
-                    "job_id": lease.task.job_id,
-                }))
-                .await;
+            ensure_task_not_cancelled(task, "before execution")?;
+            task.progress(json!({
+                "pct": 5,
+                "stage": "workspace",
+                "status": "prepared",
+                "job_root": job_root.display().to_string(),
+            }))?;
+            let _ = task.log_event(json!({
+                "level": "info",
+                "stage": "workspace",
+                "message": "workspace prepared",
+                "task_id": spec.id,
+                "job_id": spec.job_id,
+            }));
 
             // If an input CID is provided, materialize it and set up job inputs.
-            let maybe_cid = lease.task.inputs_cids.first().cloned();
+            let maybe_cid = spec.inputs_cids.first().cloned();
             let expected_colmap = [
                 ("colmap_frames_bin", "frames.bin"),
                 ("colmap_images_bin", "images.bin"),
@@ -138,10 +127,9 @@ impl compute_runner_api::Runner for HelloRunner {
                 .as_deref()
                 .ok_or_else(|| anyhow!("no input cid provided; cannot run splatter job"))?;
 
-            ensure_task_not_cancelled(&ctx, "before input materialization").await?;
-            let materialized = ctx
-                .input
-                .materialize_cid_with_meta(cid)
+            ensure_task_not_cancelled(task, "before input materialization")?;
+            let materialized = io
+                .materialize(cid)
                 .await
                 .with_context(|| format!("materialize cid {}", cid))?;
 
@@ -163,15 +151,11 @@ impl compute_runner_api::Runner for HelloRunner {
                 }
             }
 
-            if let Some((base, dom_id)) = parse_domain_from_cid(cid) {
-                domain_base_from_input = Some(base);
-                domain_id_from_input = Some(dom_id);
-            }
-
             // Read primary artifact bytes.
             let bytes = tokio::fs::read(&materialized.path).await.with_context(|| {
                 format!("read materialized path {}", materialized.path.display())
             })?;
+            let _ = tokio::fs::remove_dir_all(&materialized.root_dir).await;
 
             // Parse JSON and extract dataIDs field.
             let parsed_json: Value = serde_json::from_slice(&bytes)
@@ -208,98 +192,139 @@ impl compute_runner_api::Runner for HelloRunner {
 
             // Fetch and print metadata for all dataIDs using domain metadata endpoint.
             if !data_id_list.is_empty() {
-                if let (Some(domain_base_raw), Some(domain_id)) = (
-                    domain_base_from_input.as_deref(),
-                    domain_id_from_input.as_deref(),
-                ) {
-                    let domain_base = domain_base_raw.trim_end_matches('/').to_string();
+                // Only data UUIDs can be listed by id; names are resolved below.
+                let id_list: Vec<Uuid> = data_id_list
+                    .iter()
+                    .filter_map(|raw| Uuid::parse_str(raw.trim()).ok())
+                    .collect();
 
-                    // Try chunked requests to avoid oversized query strings.
-                    let chunk_size = 50;
-                    for chunk in data_id_list.chunks(chunk_size) {
-                        ensure_task_not_cancelled(&ctx, "resolving dataset metadata").await?;
-                        metadata_chunks += 1;
-                        let query = DownloadQuery {
-                            ids: chunk.to_vec(),
-                            name: None,
-                            data_type: None,
-                        };
-                        let token = ctx.access_token.get();
-                        match download_metadata_v1(
-                            &domain_base,
-                            &client_id,
-                            &token,
-                            domain_id,
-                            &query,
-                        )
-                        .await
-                        {
-                            Ok(metadata) => {
-                                metadata_items += metadata.len();
-                                if metadata.is_empty() {
-                                    warn!(
-                                        chunk_len = chunk.len(),
-                                        "metadata fetch returned empty chunk"
-                                    );
+                // Try chunked requests to avoid oversized query strings.
+                let chunk_size = 50;
+                for chunk in id_list.chunks(chunk_size) {
+                    ensure_task_not_cancelled(task, "resolving dataset metadata")?;
+                    metadata_chunks += 1;
+                    let query = DataListQuery {
+                        ids: chunk.to_vec(),
+                        ..Default::default()
+                    };
+                    match io.list(&query).await {
+                        Ok(metadata) => {
+                            metadata_items += metadata.len();
+                            if metadata.is_empty() {
+                                warn!(
+                                    chunk_len = chunk.len(),
+                                    "metadata fetch returned empty chunk"
+                                );
+                            }
+                            for m in metadata {
+                                info!(
+                                    data_id = %m.id,
+                                    name = %m.name,
+                                    data_type = %m.data_type,
+                                    "dataID metadata"
+                                );
+                                if !m.name.starts_with("dmt_recording_") {
+                                    continue;
                                 }
-                                for m in metadata {
-                                    info!(
-                                        data_id = %m.id,
-                                        name = %m.name,
-                                        data_type = %m.data_type,
-                                        "dataID metadata"
-                                    );
-                                    if !m.name.starts_with("dmt_recording_") {
-                                        continue;
+                                if downloaded_recordings.contains(&m.name) {
+                                    continue;
+                                }
+                                ensure_task_not_cancelled(task, "downloading input recording")?;
+                                let folder_name = m
+                                    .name
+                                    .strip_prefix("dmt_recording_")
+                                    .unwrap_or(m.name.as_str())
+                                    .to_string();
+                                let folder_name = if folder_name.is_empty() {
+                                    m.id.to_string()
+                                } else {
+                                    folder_name
+                                };
+                                let dest_path = datasets_dir.join(&folder_name).join("Frames.mp4");
+                                match download_item(io, m.id, m.size, &dest_path).await {
+                                    Ok(bytes) => {
+                                        datasets_downloaded += 1;
+                                        downloaded_recordings.insert(m.name.clone());
+                                        info!(
+                                            data_id = %m.id,
+                                            folder = %folder_name,
+                                            bytes,
+                                            dest = %dest_path.display(),
+                                            "downloaded dmt recording"
+                                        );
                                     }
-                                    if downloaded_recordings.contains(&m.name) {
-                                        continue;
+                                    Err(err) => {
+                                        recording_download_failures += 1;
+                                        warn!(
+                                            data_id = %m.id,
+                                            error = %err,
+                                            "failed to download dmt recording"
+                                        );
                                     }
-                                    ensure_task_not_cancelled(&ctx, "downloading input recording")
-                                        .await?;
-                                    let data_id = m.id.clone();
-                                    let domain_id_for_download = m.domain_id.clone();
-                                    let folder_name = m
-                                        .name
-                                        .strip_prefix("dmt_recording_")
-                                        .unwrap_or(m.name.as_str())
-                                        .to_string();
-                                    let folder_name = if folder_name.is_empty() {
-                                        data_id.clone()
+                                }
+                            }
+                        }
+                        Err(err) => {
+                            warn!(
+                                chunk_len = chunk.len(),
+                                error = %err,
+                                "metadata fetch failed for chunk"
+                            );
+                        }
+                    }
+                }
+
+                // Derive dmt_recording_* names from scan IDs if needed.
+                let mut unique_scan_ids: HashSet<String> = HashSet::new();
+                for raw in &data_id_list {
+                    let Some(scan_id) = derive_scan_id(raw) else {
+                        continue;
+                    };
+                    if !unique_scan_ids.insert(scan_id.clone()) {
+                        continue;
+                    }
+                    let candidate_names = [
+                        format!("dmt_recording_{}", scan_id),
+                        format!("dmt_recording_{}.mp4", scan_id),
+                    ];
+                    for recording_name in candidate_names {
+                        if downloaded_recordings.contains(&recording_name) {
+                            break;
+                        }
+                        ensure_task_not_cancelled(task, "resolving derived recording metadata")?;
+                        match io.find(&recording_name, Some("dmt_recording_mp4")).await {
+                            Ok(meta_list) => {
+                                if let Some(meta) = meta_list.into_iter().next() {
+                                    ensure_task_not_cancelled(
+                                        task,
+                                        "downloading derived recording",
+                                    )?;
+                                    let folder_name = if scan_id.is_empty() {
+                                        meta.id.to_string()
                                     } else {
-                                        folder_name
+                                        scan_id.clone()
                                     };
-                                    let token = ctx.access_token.get();
-                                    match download_by_id(
-                                        &domain_base,
-                                        &client_id,
-                                        &token,
-                                        &domain_id_for_download,
-                                        &data_id,
-                                    )
-                                    .await
-                                    {
+                                    let dest_path =
+                                        datasets_dir.join(&folder_name).join("Frames.mp4");
+                                    match download_item(io, meta.id, meta.size, &dest_path).await {
                                         Ok(bytes) => {
-                                            let dest_dir = datasets_dir.join(&folder_name);
-                                            tokio::fs::create_dir_all(&dest_dir).await?;
-                                            let dest_path = dest_dir.join("Frames.mp4");
-                                            tokio::fs::write(&dest_path, &bytes).await?;
                                             datasets_downloaded += 1;
-                                            downloaded_recordings.insert(m.name.clone());
+                                            downloaded_recordings.insert(recording_name.clone());
                                             info!(
-                                                data_id = %data_id,
+                                                data_id = %meta.id,
                                                 folder = %folder_name,
-                                                bytes = bytes.len(),
+                                                bytes,
                                                 dest = %dest_path.display(),
-                                                "downloaded dmt recording"
+                                                "downloaded derived dmt recording"
                                             );
+                                            break;
                                         }
                                         Err(err) => {
-                                            recording_download_failures += 1;
+                                            derived_download_failures += 1;
                                             warn!(
-                                                data_id = %data_id,
+                                                data_id = %meta.id,
                                                 error = %err,
-                                                "failed to download dmt recording"
+                                                "failed to download derived dmt recording"
                                             );
                                         }
                                     }
@@ -307,217 +332,88 @@ impl compute_runner_api::Runner for HelloRunner {
                             }
                             Err(err) => {
                                 warn!(
-                                    chunk_len = chunk.len(),
+                                    scan_id = %scan_id,
                                     error = %err,
-                                    "metadata fetch failed for chunk"
+                                    "failed to resolve derived dmt recording metadata"
+                                );
+                            }
+                        }
+                    }
+                }
+
+                if let Some(suffix) = refined_suffix.as_deref() {
+                    colmap_refs.clear();
+                    let mut missing = Vec::new();
+
+                    for (prefix, _) in expected_colmap {
+                        ensure_task_not_cancelled(task, "resolving colmap metadata")?;
+                        let expected_name = format!("{prefix}{suffix}");
+                        match io.find(&expected_name, None).await {
+                            Ok(meta_list) => {
+                                if let Some(meta) = meta_list.into_iter().next() {
+                                    info!(
+                                        name = %expected_name,
+                                        data_id = %meta.id,
+                                        "found colmap metadata"
+                                    );
+                                    colmap_refs.insert(prefix.to_string(), (meta.id, meta.size));
+                                } else {
+                                    missing.push(prefix);
+                                    warn!(name = %expected_name, "colmap metadata missing");
+                                }
+                            }
+                            Err(err) => {
+                                missing.push(prefix);
+                                warn!(
+                                    name = %expected_name,
+                                    error = %err,
+                                    "colmap metadata fetch failed"
                                 );
                             }
                         }
                     }
 
-                    // Derive dmt_recording_* names from scan IDs if needed.
-                    let mut unique_scan_ids: HashSet<String> = HashSet::new();
-                    for raw in &data_id_list {
-                        let Some(scan_id) = derive_scan_id(raw) else {
-                            continue;
-                        };
-                        if !unique_scan_ids.insert(scan_id.clone()) {
-                            continue;
-                        }
-                        let candidate_names = [
-                            format!("dmt_recording_{}", scan_id),
-                            format!("dmt_recording_{}.mp4", scan_id),
-                        ];
-                        for recording_name in candidate_names {
-                            if downloaded_recordings.contains(&recording_name) {
-                                break;
-                            }
-                            ensure_task_not_cancelled(&ctx, "resolving derived recording metadata")
-                                .await?;
-                            let query = DownloadQuery {
-                                ids: vec![],
-                                name: Some(recording_name.clone()),
-                                data_type: Some("dmt_recording_mp4".to_string()),
-                            };
-                            let token = ctx.access_token.get();
-                            match download_metadata_v1(
-                                &domain_base,
-                                &client_id,
-                                &token,
-                                domain_id,
-                                &query,
-                            )
-                            .await
-                            {
-                                Ok(meta_list) => {
-                                    if let Some(meta) = meta_list.into_iter().next() {
-                                        let data_id = meta.id.clone();
-                                        let domain_id_for_download = meta.domain_id.clone();
-                                        ensure_task_not_cancelled(
-                                            &ctx,
-                                            "downloading derived recording",
-                                        )
-                                        .await?;
-                                        let token = ctx.access_token.get();
-                                        match download_by_id(
-                                            &domain_base,
-                                            &client_id,
-                                            &token,
-                                            &domain_id_for_download,
-                                            &data_id,
-                                        )
-                                        .await
-                                        {
-                                            Ok(bytes) => {
-                                                let folder_name = if scan_id.is_empty() {
-                                                    data_id.clone()
-                                                } else {
-                                                    scan_id.clone()
-                                                };
-                                                let dest_dir = datasets_dir.join(&folder_name);
-                                                tokio::fs::create_dir_all(&dest_dir).await?;
-                                                let dest_path = dest_dir.join("Frames.mp4");
-                                                tokio::fs::write(&dest_path, &bytes).await?;
-                                                datasets_downloaded += 1;
-                                                downloaded_recordings
-                                                    .insert(recording_name.clone());
-                                                info!(
-                                                    data_id = %data_id,
-                                                    folder = %folder_name,
-                                                    bytes = bytes.len(),
-                                                    dest = %dest_path.display(),
-                                                    "downloaded derived dmt recording"
-                                                );
-                                                break;
-                                            }
-                                            Err(err) => {
-                                                derived_download_failures += 1;
-                                                warn!(
-                                                    data_id = %data_id,
-                                                    error = %err,
-                                                    "failed to download derived dmt recording"
-                                                );
-                                            }
-                                        }
-                                    }
-                                }
-                                Err(err) => {
-                                    warn!(
-                                        scan_id = %scan_id,
-                                        error = %err,
-                                        "failed to resolve derived dmt recording metadata"
-                                    );
-                                }
-                            }
-                        }
-                    }
+                    if missing.is_empty() {
+                        let dest_dir = job_root
+                            .join("refined")
+                            .join("global")
+                            .join("refined_sfm_combined");
+                        tokio::fs::create_dir_all(&dest_dir).await?;
 
-                    if let Some(suffix) = refined_suffix.as_deref() {
-                        colmap_refs.clear();
-                        let mut missing = Vec::new();
-
-                        for (prefix, _) in expected_colmap {
-                            ensure_task_not_cancelled(&ctx, "resolving colmap metadata").await?;
-                            let expected_name = format!("{prefix}{suffix}");
-                            let query = DownloadQuery {
-                                ids: vec![],
-                                name: Some(expected_name.clone()),
-                                data_type: None,
-                            };
-                            let token = ctx.access_token.get();
-                            match download_metadata_v1(
-                                &domain_base,
-                                &client_id,
-                                &token,
-                                domain_id,
-                                &query,
-                            )
-                            .await
-                            {
-                                Ok(meta_list) => {
-                                    if let Some(meta) = meta_list.into_iter().next() {
+                        for (prefix, target_name) in expected_colmap {
+                            if let Some((data_id, size)) = colmap_refs.get(prefix) {
+                                ensure_task_not_cancelled(task, "downloading colmap binary")?;
+                                let dest_path = dest_dir.join(target_name);
+                                match io.download_to(*data_id, *size, &dest_path).await {
+                                    Ok(bytes) => {
+                                        colmap_downloaded += 1;
                                         info!(
-                                            name = %expected_name,
-                                            data_id = %meta.id,
-                                            "found colmap metadata"
+                                            name = %prefix,
+                                            bytes,
+                                            dest = %dest_path.display(),
+                                            "downloaded colmap binary"
                                         );
-                                        colmap_refs.insert(
-                                            prefix.to_string(),
-                                            (meta.id, meta.domain_id.clone()),
-                                        );
-                                    } else {
-                                        missing.push(prefix);
-                                        warn!(name = %expected_name, "colmap metadata missing");
                                     }
-                                }
-                                Err(err) => {
-                                    missing.push(prefix);
-                                    warn!(
-                                        name = %expected_name,
-                                        error = %err,
-                                        "colmap metadata fetch failed"
-                                    );
-                                }
-                            }
-                        }
-
-                        if missing.is_empty() {
-                            let dest_dir = job_root
-                                .join("refined")
-                                .join("global")
-                                .join("refined_sfm_combined");
-                            tokio::fs::create_dir_all(&dest_dir).await?;
-
-                            for (prefix, target_name) in expected_colmap {
-                                if let Some((data_id, domain_id_for_download)) =
-                                    colmap_refs.get(prefix)
-                                {
-                                    ensure_task_not_cancelled(&ctx, "downloading colmap binary")
-                                        .await?;
-                                    let token = ctx.access_token.get();
-                                    match download_by_id(
-                                        &domain_base,
-                                        &client_id,
-                                        &token,
-                                        domain_id_for_download,
-                                        data_id,
-                                    )
-                                    .await
-                                    {
-                                        Ok(bytes) => {
-                                            let dest_path = dest_dir.join(target_name);
-                                            tokio::fs::write(&dest_path, &bytes).await?;
-                                            colmap_downloaded += 1;
-                                            info!(
-                                                name = %prefix,
-                                                bytes = bytes.len(),
-                                                dest = %dest_path.display(),
-                                                "downloaded colmap binary"
-                                            );
-                                        }
-                                        Err(err) => {
-                                            colmap_failed += 1;
-                                            warn!(
-                                                name = %prefix,
-                                                data_id = %data_id,
-                                                error = %err,
-                                                "failed to download colmap binary"
-                                            );
-                                        }
+                                    Err(err) => {
+                                        colmap_failed += 1;
+                                        warn!(
+                                            name = %prefix,
+                                            data_id = %data_id,
+                                            error = %err,
+                                            "failed to download colmap binary"
+                                        );
                                     }
                                 }
                             }
-                        } else {
-                            colmap_failed += missing.len();
-                            warn!(
-                                suffix = %suffix,
-                                missing = ?missing,
-                                "missing colmap binaries"
-                            );
                         }
+                    } else {
+                        colmap_failed += missing.len();
+                        warn!(
+                            suffix = %suffix,
+                            missing = ?missing,
+                            "missing colmap binaries"
+                        );
                     }
-                } else {
-                    warn!(%cid, "could not resolve domain info from cid or lease");
                 }
             }
 
@@ -536,48 +432,35 @@ impl compute_runner_api::Runner for HelloRunner {
                 ));
             }
 
-            ctx.ctrl
-                .progress(json!({
-                    "pct": 20,
-                    "stage": "inputs",
-                    "status": "materialized",
-                    "datasets": datasets_downloaded,
-                    "metadata_chunks": metadata_chunks,
-                    "metadata_items": metadata_items,
-                    "recording_failures": recording_download_failures + derived_download_failures,
-                    "colmap_downloaded": colmap_downloaded,
-                    "colmap_failed": colmap_failed,
-                }))
-                .await?;
-            let _ = ctx
-                .ctrl
-                .log_event(json!({
-                    "level": "info",
-                    "stage": "inputs",
-                    "message": "inputs materialized",
-                    "datasets": datasets_downloaded,
-                    "metadata_chunks": metadata_chunks,
-                    "metadata_items": metadata_items,
-                    "recording_failures": recording_download_failures + derived_download_failures,
-                    "colmap_downloaded": colmap_downloaded,
-                    "colmap_failed": colmap_failed,
-                }))
-                .await;
+            task.progress(json!({
+                "pct": 20,
+                "stage": "inputs",
+                "status": "materialized",
+                "datasets": datasets_downloaded,
+                "metadata_chunks": metadata_chunks,
+                "metadata_items": metadata_items,
+                "recording_failures": recording_download_failures + derived_download_failures,
+                "colmap_downloaded": colmap_downloaded,
+                "colmap_failed": colmap_failed,
+            }))?;
+            let _ = task.log_event(json!({
+                "level": "info",
+                "stage": "inputs",
+                "message": "inputs materialized",
+                "datasets": datasets_downloaded,
+                "metadata_chunks": metadata_chunks,
+                "metadata_items": metadata_items,
+                "recording_failures": recording_download_failures + derived_download_failures,
+                "colmap_downloaded": colmap_downloaded,
+                "colmap_failed": colmap_failed,
+            }));
 
             // Run the Python pipeline and upload the splat.
-            let Some(domain_id_str) = lease
-                .domain_id
-                .map(|d| d.to_string())
-                .or(domain_id_from_input.clone())
-            else {
-                return Err(anyhow!(
-                    "domain_id missing (task domain_id and input cid domain_id were None)"
-                ));
-            };
+            let domain_id_str = domain_id.to_string();
 
-            let job_id_str = lease.task.job_id.map(|j| j.to_string()).unwrap_or_else(|| {
+            let job_id_str = spec.job_id.map(|j| j.to_string()).unwrap_or_else(|| {
                 // Fallback to task id so the script always has a value.
-                lease.task.id.to_string()
+                spec.id.to_string()
             });
 
             // Resolve run.py path at runtime so the container layout is flexible.
@@ -593,25 +476,20 @@ impl compute_runner_api::Runner for HelloRunner {
                 .map(PathBuf::from)
                 .unwrap_or_else(|| exe_dir.clone());
 
-            ensure_task_not_cancelled(&ctx, "before python start").await?;
-            ctx.ctrl
-                .progress(json!({
-                    "pct": 35,
-                    "stage": "python",
-                    "status": "starting",
-                    "job_root_path": job_root.display().to_string(),
-                    "script": run_py.display().to_string(),
-                }))
-                .await?;
-            let _ = ctx
-                .ctrl
-                .log_event(json!({
-                    "level": "info",
-                    "stage": "python",
-                    "message": "python pipeline starting",
-                    "script": run_py.display().to_string(),
-                }))
-                .await;
+            ensure_task_not_cancelled(task, "before python start")?;
+            task.progress(json!({
+                "pct": 35,
+                "stage": "python",
+                "status": "starting",
+                "job_root_path": job_root.display().to_string(),
+                "script": run_py.display().to_string(),
+            }))?;
+            let _ = task.log_event(json!({
+                "level": "info",
+                "stage": "python",
+                "message": "python pipeline starting",
+                "script": run_py.display().to_string(),
+            }));
 
             let mut child = Command::new("python3")
                 .arg(&run_py)
@@ -645,21 +523,18 @@ impl compute_runner_api::Runner for HelloRunner {
             let mut tail: VecDeque<String> = VecDeque::with_capacity(200);
             let mut stdout_lines = 0usize;
             let mut stderr_lines = 0usize;
-            let mut cancel_check = tokio::time::interval(std::time::Duration::from_millis(500));
-            cancel_check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            let cancellation = task.cancellation();
 
             // Read both streams concurrently to avoid deadlocks and keep logs structured.
             let mut stdout_done = false;
             let mut stderr_done = false;
             while !stdout_done || !stderr_done {
                 tokio::select! {
-                _ = cancel_check.tick() => {
-                    if ctx.ctrl.is_cancelled().await {
+                    _ = cancellation.cancelled() => {
                         let _ = child.kill().await;
                         let _ = child.wait().await;
                         return Err(anyhow!("{TASK_CANCELLED_PREFIX}: python execution"));
                     }
-                }
                     line = stdout_reader.next_line(), if !stdout_done => {
                         match line {
                             Ok(Some(l)) => {
@@ -698,53 +573,42 @@ impl compute_runner_api::Runner for HelloRunner {
 
             if !status.success() {
                 let summary_tail: Vec<String> = tail.into_iter().collect();
-                let _ = ctx
-                    .ctrl
-                    .progress(json!({
-                        "pct": 35,
-                        "stage": "python",
-                        "status": "failed",
-                    }))
-                    .await;
-                let _ = ctx
-                    .ctrl
-                    .log_event(json!({
-                        "level": "error",
-                        "stage": "python",
-                        "message": "python job failed",
-                        "status": status.code(),
-                        "duration_ms": duration.as_millis(),
-                        "stdout_lines": stdout_lines,
-                        "stderr_lines": stderr_lines,
-                        "tail": summary_tail,
-                    }))
-                    .await;
-                return Err(anyhow!("python job failed: status={:?}", status.code()));
-            }
-
-            ctx.ctrl
-                .progress(json!({
-                    "pct": 80,
+                let _ = task.progress(json!({
+                    "pct": 35,
                     "stage": "python",
-                    "status": "completed",
-                    "duration_ms": duration.as_millis(),
-                }))
-                .await?;
-            let _ = ctx
-                .ctrl
-                .log_event(json!({
-                    "level": "info",
+                    "status": "failed",
+                }));
+                let _ = task.log_event(json!({
+                    "level": "error",
                     "stage": "python",
-                    "message": "python pipeline completed",
+                    "message": "python job failed",
                     "status": status.code(),
                     "duration_ms": duration.as_millis(),
                     "stdout_lines": stdout_lines,
                     "stderr_lines": stderr_lines,
-                }))
-                .await;
+                    "tail": summary_tail,
+                }));
+                return Err(anyhow!("python job failed: status={:?}", status.code()));
+            }
+
+            task.progress(json!({
+                "pct": 80,
+                "stage": "python",
+                "status": "completed",
+                "duration_ms": duration.as_millis(),
+            }))?;
+            let _ = task.log_event(json!({
+                "level": "info",
+                "stage": "python",
+                "message": "python pipeline completed",
+                "status": status.code(),
+                "duration_ms": duration.as_millis(),
+                "stdout_lines": stdout_lines,
+                "stderr_lines": stderr_lines,
+            }));
 
             // Upload splat_rot.splat if it exists.
-            ensure_task_not_cancelled(&ctx, "before upload").await?;
+            ensure_task_not_cancelled(task, "before upload")?;
             let splat_rel = PathBuf::from("refined")
                 .join("splatter")
                 .join("splat_rot.splat");
@@ -766,51 +630,41 @@ impl compute_runner_api::Runner for HelloRunner {
                 "refined_splat".to_string()
             };
 
-            ctx.ctrl
-                .progress(json!({
-                    "pct": 90,
-                    "stage": "upload",
-                    "status": "starting",
-                    "artifact": upload_key.as_str(),
-                }))
-                .await?;
+            task.progress(json!({
+                "pct": 90,
+                "stage": "upload",
+                "status": "starting",
+                "artifact": upload_key.as_str(),
+            }))?;
 
-            ctx.output
-                .put_domain_artifact(compute_runner_api::runner::DomainArtifactRequest {
-                    rel_path: upload_key.as_str(),
-                    name: upload_key.as_str(),
-                    data_type: "splat_data",
-                    existing_id: None,
-                    content: compute_runner_api::runner::DomainArtifactContent::File(&splat_abs),
-                })
-                .await
-                .with_context(|| format!("upload {} as {}", splat_abs.display(), upload_key))?;
+            io.put_domain_artifact(ArtifactRequest {
+                rel_path: upload_key.as_str(),
+                name: upload_key.as_str(),
+                data_type: "splat_data",
+                existing_id: None,
+                content: ArtifactContent::File(&splat_abs),
+            })
+            .await
+            .with_context(|| format!("upload {} as {}", splat_abs.display(), upload_key))?;
 
-            ctx.ctrl
-                .progress(json!({
-                    "pct": 95,
-                    "stage": "upload",
-                    "status": "completed",
-                    "uploaded": upload_key.as_str(),
-                    "splat_path": splat_abs.display().to_string(),
-                }))
-                .await?;
-            let _ = ctx
-                .ctrl
-                .log_event(json!({
-                    "level": "info",
-                    "stage": "upload",
-                    "message": "output uploaded",
-                    "uploaded": upload_key.as_str(),
-                }))
-                .await;
-            ctx.ctrl
-                .progress(json!({
-                    "progress": 100,
-                    "stage": "complete",
-                    "status": "succeeded",
-                }))
-                .await?;
+            task.progress(json!({
+                "pct": 95,
+                "stage": "upload",
+                "status": "completed",
+                "uploaded": upload_key.as_str(),
+                "splat_path": splat_abs.display().to_string(),
+            }))?;
+            let _ = task.log_event(json!({
+                "level": "info",
+                "stage": "upload",
+                "message": "output uploaded",
+                "uploaded": upload_key.as_str(),
+            }));
+            task.progress(json!({
+                "progress": 100,
+                "stage": "complete",
+                "status": "succeeded",
+            }))?;
 
             Ok(())
         }
@@ -818,30 +672,21 @@ impl compute_runner_api::Runner for HelloRunner {
 
         if let Err(err) = &task_result {
             if is_task_cancelled_error(err) {
-                let _ = ctx
-                    .ctrl
-                    .progress(json!({
-                        "stage": "cancelled",
-                        "status": "cancelled",
-                    }))
-                    .await;
-                let _ = ctx
-                    .ctrl
-                    .log_event(json!({
-                        "level": "warn",
-                        "stage": "cancelled",
-                        "message": err.to_string(),
-                    }))
-                    .await;
+                let _ = task.progress(json!({
+                    "stage": "cancelled",
+                    "status": "cancelled",
+                }));
+                let _ = task.log_event(json!({
+                    "level": "warn",
+                    "stage": "cancelled",
+                    "message": err.to_string(),
+                }));
             } else {
-                let _ = ctx
-                    .ctrl
-                    .log_event(json!({
-                        "level": "error",
-                        "stage": "runner",
-                        "message": err.to_string(),
-                    }))
-                    .await;
+                let _ = task.log_event(json!({
+                    "level": "error",
+                    "stage": "runner",
+                    "message": err.to_string(),
+                }));
             }
         }
 

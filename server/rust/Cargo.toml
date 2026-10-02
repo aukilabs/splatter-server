@@ -1,3 +1,9 @@
 [workspace]
-members = ["bin", "runner"]
+members = ["bin", "node-host", "runner"]
 resolver = "2"
+
+[workspace.dependencies]
+# Auki SDK task runtime; no crates.io release, so pin an exact develop revision.
+auki-sdk = { git = "https://github.com/aukilabs/auki-sdk", rev = "a497e41cd0a72a99f397ef2cc6be2d31d3504420" }
+auki-auth = { git = "https://github.com/aukilabs/auki-sdk", rev = "a497e41cd0a72a99f397ef2cc6be2d31d3504420" }
+auki-dms = { git = "https://github.com/aukilabs/auki-sdk", rev = "a497e41cd0a72a99f397ef2cc6be2d31d3504420", default-features = false, features = ["client"] }
