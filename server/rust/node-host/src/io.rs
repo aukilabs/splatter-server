@@ -94,6 +94,10 @@ pub struct TaskIo {
 impl TaskIo {
     pub fn new(task: &TaskContext) -> Result<Self> {
         let lease = task.credential.lease_snapshot()?;
+        // The 0.3.2 host refused leases without a Domain Server (node_setup_failed).
+        let base = lease
+            .domain_server_url
+            .ok_or_else(|| anyhow!("lease missing domain_server_url"))?;
         let data = AukiDomainData::with_limits(
             task.credential.clone(),
             DataLimits {
@@ -105,7 +109,7 @@ impl TaskIo {
         Ok(Self::from_parts(
             data,
             task.cancellation(),
-            lease.domain_server_url,
+            Some(base),
             task.task.outputs_prefix.clone(),
             task.task.id,
         ))
