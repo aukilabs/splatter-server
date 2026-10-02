@@ -8,6 +8,7 @@
 pub mod config;
 pub mod host;
 pub mod io;
+pub mod process;
 pub mod router;
 pub mod telemetry;
 

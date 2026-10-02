@@ -2,7 +2,7 @@ use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use node_host::auki_sdk::DataListQuery;
 use node_host::{
-    telemetry, ArtifactContent, ArtifactRequest, NodeRunner, Router, TaskContext, TaskIo,
+    process, telemetry, ArtifactContent, ArtifactRequest, NodeRunner, Router, TaskContext, TaskIo,
 };
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -491,7 +491,8 @@ impl NodeRunner for HelloRunner {
                 "script": run_py.display().to_string(),
             }));
 
-            let mut child = Command::new("python3")
+            let mut command = Command::new("python3");
+            let mut child = process::isolate(&mut command)
                 .arg(&run_py)
                 .arg("--domain_id")
                 .arg(&domain_id_str)
@@ -531,8 +532,7 @@ impl NodeRunner for HelloRunner {
             while !stdout_done || !stderr_done {
                 tokio::select! {
                     _ = cancellation.cancelled() => {
-                        let _ = child.kill().await;
-                        let _ = child.wait().await;
+                        process::terminate_group(&mut child, process::TERMINATE_GRACE).await;
                         return Err(anyhow!("{TASK_CANCELLED_PREFIX}: python execution"));
                     }
                     line = stdout_reader.next_line(), if !stdout_done => {

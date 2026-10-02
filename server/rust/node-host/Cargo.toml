@@ -9,6 +9,7 @@ description = "Compute-node host on the Auki SDK task runtime: claim loop, Domai
 anyhow = "1.0.95"
 async-trait = "0.1.88"
 auki-sdk = { workspace = true }
+libc = "0.2"
 parking_lot = "0.12"
 regex = "1.11"
 serde = { version = "1.0.210", features = ["derive"] }
