@@ -1,6 +1,6 @@
 use anyhow::Result;
-use posemesh_compute_node::engine::RunnerRegistry;
-use posemesh_compute_node::telemetry;
+use axum::{http::StatusCode, routing::get, Router};
+use node_host::{telemetry, HostConfig};
 use std::env;
 use std::path::PathBuf;
 use tracing::info;
@@ -49,7 +49,7 @@ async fn main() -> Result<()> {
         );
     }
 
-    let app = posemesh_compute_node::http::router();
+    let app = Router::new().route("/health", get(|| async { StatusCode::OK }));
     let listener = tokio::net::TcpListener::bind("0.0.0.0:8080").await?;
     let addr = listener.local_addr()?;
     println!("http listening on {}", addr);
@@ -57,16 +57,9 @@ async fn main() -> Result<()> {
         let _ = axum::serve(listener, app).await;
     });
 
-    let mut cfg = posemesh_compute_node::config::NodeConfig::from_env()?;
-    cfg.node_version = SPLATTER_NODE_VERSION.to_string();
+    let cfg = HostConfig::from_env(SPLATTER_NODE_VERSION, "splatter-node")?;
+    let router = splatter_runner::registry();
+    info!(capabilities = ?router.capabilities(), "splatter runner registered capabilities");
 
-    let registry: RunnerRegistry = splatter_runner::registry();
-    let capabilities = registry.capabilities();
-
-    posemesh_compute_node::dds::register::spawn_registration_if_configured(&cfg, &capabilities)?;
-    info!(?capabilities, "splatter runner registered capabilities");
-
-    posemesh_compute_node::engine::run_node(cfg, registry).await?;
-
-    Ok(())
+    node_host::run(cfg, router).await
 }

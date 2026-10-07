@@ -11,8 +11,8 @@ Guidance for AI agents working in `aukilabs/splatter-server`.
 ## Source layout
 
 - `server/rust/` is the Rust compute-node workspace.
-  - `server/rust/bin/src/main.rs` starts the HTTP server, loads node config from environment, registers the Splatter runner capabilities, and runs the compute node.
-  - `server/rust/runner/src/lib.rs` implements the `/splatter/colmap/v1` runner, materializes input CIDs, fetches DMT recordings and COLMAP artifacts through domain-service helpers, runs the Python pipeline, and uploads the resulting splat as `splat_data`.
+  - `server/rust/bin/src/main.rs` starts the HTTP server, loads node config from environment, registers the Splatter runner capabilities, and runs the compute node through `node-host`.
+  - `server/rust/runner/src/lib.rs` implements the `/splatter/colmap/v1` runner, materializes input CIDs, fetches DMT recordings and COLMAP artifacts through `node-host` task IO, runs the Python pipeline, and uploads the resulting splat as `splat_data`.
   - `server/rust/Makefile` wraps local Rust commands for run, check, fmt, clippy, test, and ci.
 - Root-level Python scripts drive the training/export pipeline:
   - `run.py` orchestrates `ns-process-data`, `ns-train`, `ns-export`, `rotate_ply.py`, and `convert_ply2splat.py`.
@@ -24,8 +24,8 @@ Guidance for AI agents working in `aukilabs/splatter-server`.
 ## DDS, DMS, and domain-service dependencies
 
 - Node registration and task polling depend on the compute-node environment. Use `server/rust/.env.example` only as a list of variable names/default shapes; do not commit real values.
-- Important environment names include `DDS_BASE_URL`, `DMS_BASE_URL`, `REG_SECRET`, `SECP256K1_PRIVHEX`, `NODE_URL`, `REQUEST_TIMEOUT_SECS`, `LOG_FORMAT`, and `ENABLE_NOOP`.
-- The runner uses domain-service HTTP helpers to read metadata and download data artifacts from CIDs. Changes to CID parsing, metadata lookups, download behavior, token/client handling, or output upload naming can affect DDS, DMS, DMT, reconstruction-server, and domain-service compatibility.
+- Important environment names include `DDS_BASE_URL`, `DMS_BASE_URL`, `REG_SECRET`, `SECP256K1_PRIVHEX`, `REQUEST_TIMEOUT_SECS`, `REGISTER_INTERVAL_SECS`, `CLIENT_ID`, and `LOG_FORMAT`.
+- The node runs on the Auki SDK task runtime via `server/rust/node-host`, which reads metadata, downloads data artifacts from CIDs and uploads outputs with the SDK data client. `node-host` keeps the wire behaviour (input layout, artifact names/upserts, DMS receipt shapes) of the former `posemesh-compute-node` 0.3.2 host; `node-host/tests` pins it. Changes to CID parsing, metadata lookups, download behavior, token/client handling, or output upload naming can affect DDS, DMS, DMT, reconstruction-server, and domain-service compatibility.
 - The input path expects a refined manifest plus DMT recording data and COLMAP outputs. The output upload path uses `refined_splat...` names with data type `splat_data`.
 
 ## Kubernetes and deployment cautions
