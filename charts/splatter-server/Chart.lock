@@ -1,6 +1,0 @@
-dependencies:
-- name: splatter-server
-  repository: file://charts/splatter-server
-  version: 0.1.0
-digest: sha256:297e4a73146b1734acfcb00a799fc13530d427072fcac9766329ce5f18f97761
-generated: "2025-12-12T09:07:56.828568+07:00"
