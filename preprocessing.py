@@ -70,7 +70,7 @@ def cleanup_rec_cameras(
     rec: pycolmap.Reconstruction,
     min_3d_points_seen: int = 20,
     view_count_max_depth: float = 3.0,
-    black_mask_threshold: float = 0.01, # percentage of pixels completely black to skip (assume human occlusion)
+    black_mask_threshold: float = -1.0,  # disabled: black rects use train masks/ sidecars (v0.2)
     blur_threshold: float = 20.0, # Laplacian variance below this = too blurry
     frames_dir: Path = None
 ) -> pycolmap.Reconstruction:
@@ -277,6 +277,53 @@ def preprocess(
     rec.write(str(processed_dir))
     print(f"Cleaned colmap reconstruction written to: {processed_dir}")
     print(rec.summary())
+
+def undistort_local_scan(job_root: Path, scan_id: str) -> None:
+    """Undistort refined SFM into ``dense/`` without sparse point outlier cleanup (densify path)."""
+    print(f"Undistort-only staging for scan {scan_id} (densify path)...")
+    frames_dir = job_root / "datasets" / scan_id / "Frames"
+    if not frames_dir.exists():
+        raise FileNotFoundError(f"Frames directory not found: {frames_dir}")
+
+    colmap_dir = job_root / "refined" / "local" / scan_id / "sfm"
+    dense_dir = job_root / "refined" / "local" / scan_id / "dense"
+    processed_dir = job_root / "refined" / "local" / scan_id / "processed"
+    processed_dir.mkdir(parents=True, exist_ok=True)
+    shutil.rmtree(dense_dir, ignore_errors=True)
+    dense_dir.mkdir(parents=True, exist_ok=True)
+
+    rec = pycolmap.Reconstruction()
+    rec.read(str(colmap_dir))
+    rec = cleanup_rec_cameras(rec, min_3d_points_seen=20, view_count_max_depth=3.0, frames_dir=frames_dir)
+    rec.write(str(processed_dir))
+    pycolmap.undistort_images(
+        output_path=str(dense_dir),
+        input_path=str(processed_dir),
+        image_path=str(frames_dir),
+    )
+
+
+def undistort_merged_colmap(
+    colmap_dir: Path,
+    processed_dir: Path,
+    frames_dir: Path,
+    dense_dir: Path,
+) -> None:
+    """Undistort merged global COLMAP for colmap/v1 without sparse point cleanup."""
+    processed_dir.mkdir(parents=True, exist_ok=True)
+    shutil.rmtree(dense_dir, ignore_errors=True)
+    dense_dir.mkdir(parents=True, exist_ok=True)
+
+    rec = pycolmap.Reconstruction()
+    rec.read(str(colmap_dir))
+    rec = cleanup_rec_cameras(rec, min_3d_points_seen=20, view_count_max_depth=3.0, frames_dir=frames_dir)
+    rec.write(str(processed_dir))
+    pycolmap.undistort_images(
+        output_path=str(dense_dir),
+        input_path=str(processed_dir),
+        image_path=str(frames_dir),
+    )
+
 
 def scan_main(job_root: Path, scan_id: str, bundle_adjust: bool = False):
     print(f"Processing scan {scan_id}...")

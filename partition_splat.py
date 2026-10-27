@@ -126,8 +126,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--partition-size",
         type=float,
-        default=5.0,
-        help="Size of each partition tile in meters. Default: 5.0"
+        default=10.0,
+        help="Size of each partition tile in meters. Default: 10.0"
     )
     parser.add_argument(
         "--output-dir", "-o",

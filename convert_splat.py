@@ -94,6 +94,40 @@ def convert_ply_to_sog(input_path: Path, output_path: Path = None) -> Path:
         )
 
 
+def convert_sog_to_ply(input_path: Path, output_path: Path = None) -> Path:
+    """Convert a .sog file to PLY using LichtFeld-Studio convert (for combine/import)."""
+    input_path = Path(input_path)
+    output_path = (
+        Path(output_path)
+        if output_path
+        else input_path.with_name(f"{input_path.stem}_import.ply")
+    )
+
+    cmd = [
+        LICHTFELD_BIN,
+        "convert",
+        str(input_path),
+        str(output_path),
+        "-y",
+    ]
+
+    print(f"Converting SOG to PLY (LichtFeld): {input_path.name} -> {output_path.name}")
+    try:
+        subprocess.run(cmd, check=True, capture_output=True, text=True)
+        if not output_path.exists() or output_path.stat().st_size == 0:
+            raise RuntimeError(
+                f"SOG→PLY conversion produced empty/missing output: {output_path}"
+            )
+        return output_path
+    except subprocess.CalledProcessError as e:
+        detail = (e.stderr or e.stdout or "").strip()
+        raise RuntimeError(f"SOG→PLY conversion failed: {detail or e}")
+    except FileNotFoundError:
+        raise FileNotFoundError(
+            f"{LICHTFELD_BIN} not found. Set LICHTFELD_BIN or build LichtFeld-Studio."
+        )
+
+
 def convert_file(input_path: Path, output_format: str) -> list[Path]:
     """
     Convert a splat file to the specified format(s).

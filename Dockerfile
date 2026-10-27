@@ -74,9 +74,8 @@ RUN update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-14 60 && \
 
 WORKDIR /app
 
-# Build LichtFeld Studio (pin must include FastGS L_d + s6 geo recipe).
-# Default: 3693dfb73. Override --build-arg once that commit is on the clone remote.
-ARG LICHTFELD_GIT_REF=3693dfb737312495fc536b7e53fe88c51c127226
+# Build LichtFeld Studio (official release pin for splatter v0.2).
+ARG LICHTFELD_GIT_REF=v0.5.4.2
 RUN git clone https://github.com/microsoft/vcpkg.git
 RUN cd vcpkg && ./bootstrap-vcpkg.sh -disableMetrics
 RUN git clone --recursive https://github.com/MrNeRF/LichtFeld-Studio
@@ -99,14 +98,23 @@ RUN python -m pip install --no-cache-dir --upgrade pip && \
     python -m pip install --no-cache-dir -r /app/requirements.txt
 
 # Pipeline code
-COPY splatter_pipeline.py artifact_naming.py local_main.py global_main.py combine_splats.py convert_splat.py filter_splats.py preprocessing.py partition_splat.py /app/
+COPY splatter_pipeline.py artifact_naming.py local_main.py global_main.py combine_splats.py convert_splat.py filter_splats.py preprocessing.py partition_splat.py crop_aabb.py black_pixel_masks.py densify_init.py /app/
 
-# Train helper + crop-fit (vendored; recipe in config JSON)
-COPY scripts/train_helper.sh scripts/auto_fit_cropbox.py /app/scripts/
-RUN chmod +x /app/scripts/train_helper.sh \
-    && sed -i "s/\r$//" /app/scripts/train_helper.sh /app/scripts/auto_fit_cropbox.py
+# Train helper (vendored; recipe in config JSON)
+COPY scripts/train_helper.sh scripts/run_densify_cli.py /app/scripts/
+RUN chmod +x /app/scripts/train_helper.sh /app/scripts/run_densify_cli.py \
+    && sed -i "s/\r$//" /app/scripts/train_helper.sh /app/scripts/run_densify_cli.py
 
-# LichtFeld train config (s6_ld50 geo recipe in lichtfeld_optimization_params.json)
+# --- RoMa densification plugin (S5) ---
+# Skipped for now (2026-10-25): bake is flaky / slow; product runs without densify.
+# Re-enable: restore densify-venv clone + deps install + romav2.pt, then SPLATTER_DENSIFY=1.
+ENV DENSIFY_PLUGIN_ROOT=/app/Lichtfeld-Densification-Plugin
+ENV DENSIFY_CLI_SCRIPT=/app/scripts/run_densify_cli.py
+ENV DENSIFY_ROMA_SETTING=turbo
+ENV DENSIFY_NUM_REFS=0.6
+ENV SPLATTER_DENSIFY=0
+
+# LichtFeld train config (lichtfeld_optimization_params.json)
 COPY config/lichtfeld_optimization_params.json config/lichtfeld_optimization_params_vda.json /app/config/
 
 # Legacy scripts for fallback mode if explicitly enabled
@@ -127,19 +135,14 @@ ENV LICHTFELD_CONFIG_VDA=/app/config/lichtfeld_optimization_params_vda.json
 # Install sudo for runtime elevated permissions if needed
 RUN apt-get update && apt-get install -y sudo && rm -rf /var/lib/apt/lists/*
 
-# Non-root runtime: only chown directories the process actually writes to
+# Non-root runtime: only chown directories the process actually writes to.
+# Densify paths omitted while SPLATTER_DENSIFY=0 / bake skipped.
 RUN mkdir -p /app/tasks \
     && chown -R "$USER_UID:$USER_GID" /app/tasks
 
 # Add $USER_UID as a user with sudo privileges (without password)
 RUN useradd -u "$USER_UID" -o -m user || true \
     && echo "user ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers
-
-# MoGe-2 weights for preprocess (same release URL as LichtFeld preprocess.cpp)
-ARG MOGE_MODEL_URL=https://github.com/MrNeRF/LichtFeld-Studio/releases/download/model-moge2-v1/moge-2-vitb-normal.lfw
-RUN mkdir -p /home/user/.lichtfeld/onnx \
-    && curl -fsSL -o /home/user/.lichtfeld/onnx/moge-2-vitb-normal.lfw "${MOGE_MODEL_URL}" \
-    && chown -R "$USER_UID:$USER_GID" /home/user/.lichtfeld
 
 USER $USER_UID:$USER_GID
 

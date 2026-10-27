@@ -91,7 +91,7 @@ fn parse_progress_line(line: &str) -> Option<PipelineProgress> {
 }
 
 /// Try to extract training iteration progress from lines like:
-/// `Training [...] 45% [01m:30s<01m:50s] 9000/20000 | Loss: 0.0501`
+/// `Training [...] 45% [01m:30s<01m:50s] 9000/30000 | Loss: 0.0501`
 fn parse_training_progress(line: &str) -> Option<(u32, u32, f32)> {
     if !line.contains("Training") || !line.contains('/') {
         return None;
@@ -143,15 +143,22 @@ fn bool_env(name: &str, default: bool) -> bool {
 }
 
 fn splatter_iterations() -> String {
-    env::var("SPLATTER_ITERATIONS").unwrap_or_else(|_| "20000".to_string())
+    env::var("SPLATTER_ITERATIONS").unwrap_or_else(|_| "30000".to_string())
 }
 
 fn convert_to_sog_default(mode: CapabilityMode) -> bool {
-    matches!(mode, CapabilityMode::GlobalV1)
+    matches!(
+        mode,
+        CapabilityMode::GlobalV1 | CapabilityMode::LocalV1
+    )
 }
 
 fn convert_to_splat_default(mode: CapabilityMode) -> bool {
-    !matches!(mode, CapabilityMode::GlobalV1)
+    matches!(mode, CapabilityMode::ColmapV1)
+}
+
+fn splatter_partition_size() -> String {
+    env::var("SPLATTER_PARTITION_SIZE").unwrap_or_else(|_| "10".to_string())
 }
 
 /// Extract (domain_server_base, domain_id) from a full data CID URL.
@@ -168,9 +175,11 @@ fn parse_domain_from_cid(cid: &str) -> Option<(String, String)> {
 
 /// Map a GlobalV1 input name (dataID or bare input cid) to (lookup_name, data_type).
 /// Manifests often list `refined_scan_<scan_id>` even for global; those resolve to
-/// `local_splat_ply_<scan_id>`.
+/// `local_splat_sog_<scan_id>` (legacy `local_splat_ply_*` still accepted).
 fn global_input_name_query(raw: &str) -> Option<(String, &'static str)> {
-    if raw.starts_with("local_splat_ply_") {
+    if raw.starts_with("local_splat_sog_") {
+        Some((raw.to_string(), "local_splat_sog"))
+    } else if raw.starts_with("local_splat_ply_") {
         Some((raw.to_string(), "local_splat_ply"))
     } else if raw.starts_with("refined_manifest") {
         Some((raw.to_string(), "refined_manifest_json"))
@@ -178,7 +187,7 @@ fn global_input_name_query(raw: &str) -> Option<(String, &'static str)> {
         if scan_id.is_empty() {
             None
         } else {
-            Some((format!("local_splat_ply_{scan_id}"), "local_splat_ply"))
+            Some((format!("local_splat_sog_{scan_id}"), "local_splat_sog"))
         }
     } else {
         None
@@ -779,8 +788,8 @@ impl compute_runner_api::Runner for SplatterRunner {
                         }
                     }
 
-                    // GlobalV1: dataIDs may be artifact names (local_splat_ply_*,
-                    // refined_scan_* → local_splat_ply_*, refined_manifest*) instead
+                    // GlobalV1: dataIDs may be artifact names (local_splat_sog_*,
+                    // refined_scan_* → local_splat_sog_*, refined_manifest*) instead
                     // of UUIDs — resolve by name.
                     if mode == CapabilityMode::GlobalV1 {
                         for raw in &data_id_list {
@@ -990,6 +999,10 @@ impl compute_runner_api::Runner for SplatterRunner {
                 args.push("--no_partition".to_string());
             } else {
                 args.push("--partition".to_string());
+            }
+            if mode == CapabilityMode::GlobalV1 {
+                args.push("--partition_size".to_string());
+                args.push(splatter_partition_size());
             }
             args
         };
@@ -1333,6 +1346,33 @@ async fn materialize_inputs_for_mode(
                 }
             }
             CapabilityMode::GlobalV1 => {
+                if data_type == "local_splat_sog" || m.name.starts_with("local_splat_sog_") {
+                    let scan_id =
+                        normalize_scan_id(m.name.trim_start_matches("local_splat_sog_"));
+                    let sog_name = format!("splat_{}.filtered.sog", splatter_iterations());
+                    let dest = job_root
+                        .join("refined")
+                        .join("local")
+                        .join(&scan_id)
+                        .join("splat")
+                        .join(sog_name);
+                    let bytes = download_to(domain_base, client_id, token, &m.domain_id, &m.id, &dest).await?;
+                    let dataset_dir = job_root.join("datasets").join(&scan_id);
+                    tokio::fs::create_dir_all(&dataset_dir).await?;
+                    summary.datasets_downloaded += 1;
+                    scan_set.insert(scan_id.clone());
+                    ctx.ctrl
+                        .log_event(json!({
+                            "level": "info",
+                            "message": "downloaded local splat sog",
+                            "data_id": m.id.as_str(),
+                            "scan_id": scan_id,
+                            "bytes": bytes,
+                            "dest": dest.display().to_string(),
+                        }))
+                        .await?;
+                    continue;
+                }
                 if data_type == "local_splat_ply" || m.name.starts_with("local_splat_ply_") {
                     let scan_id = normalize_scan_id(m.name.trim_start_matches("local_splat_ply_"));
                     let ply_name = format!("splat_{}.filtered.ply", splatter_iterations());
@@ -1350,7 +1390,7 @@ async fn materialize_inputs_for_mode(
                     ctx.ctrl
                         .log_event(json!({
                             "level": "info",
-                            "message": "downloaded local splat ply",
+                            "message": "downloaded local splat ply (legacy)",
                             "data_id": m.id.as_str(),
                             "scan_id": scan_id,
                             "bytes": bytes,
@@ -1716,4 +1756,25 @@ async fn upload_staged_outputs(ctx: &compute_runner_api::TaskCtx<'_>, job_root: 
         return Err(anyhow!("no staged outputs found in {}", output_dir.display()));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod product_contract_tests {
+    use super::*;
+
+    #[test]
+    fn colmap_keeps_splat_defaults_local_global_sog_only() {
+        assert!(
+            !convert_to_sog_default(CapabilityMode::ColmapV1),
+            "colmap must not default to SOG product conversion"
+        );
+        assert!(
+            convert_to_splat_default(CapabilityMode::ColmapV1),
+            "colmap defaults to .splat product path"
+        );
+        assert!(convert_to_sog_default(CapabilityMode::LocalV1));
+        assert!(convert_to_sog_default(CapabilityMode::GlobalV1));
+        assert!(!convert_to_splat_default(CapabilityMode::LocalV1));
+        assert!(!convert_to_splat_default(CapabilityMode::GlobalV1));
+    }
 }

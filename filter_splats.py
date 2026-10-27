@@ -68,7 +68,7 @@ def default_args() -> argparse.Namespace:
         output_ply=None,
         output_ply_2=None,
         job_root=None,
-        splat_filename="splat_20000",
+        splat_filename="splat_30000",
         overwrite=False,
         min_opacity=None,
         max_opacity=None,
@@ -105,7 +105,7 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument("--job-root", type=Path, help="Job root directory, to process splats within refinement", default=None)
-    parser.add_argument("--splat-filename", type=str, help="Base name of the splat file to filter", default="splat_20000")
+    parser.add_argument("--splat-filename", type=str, help="Base name of the splat file to filter", default="splat_30000")
     parser.add_argument("--overwrite", action="store_true", help="Force re-processing of existing output splat PLYs.")
 
     # Opacity options

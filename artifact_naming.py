@@ -43,3 +43,12 @@ def rename_for_domain_upload(
         )
 
     return None
+
+
+def colmap_refined_splat_upload_name(refined_suffix: str | None) -> str:
+    """Domain artifact name for ``/splatter/colmap/v1`` (mirrors Rust upload_colmap_result)."""
+    if not refined_suffix:
+        return "refined_splat"
+    if refined_suffix.startswith("_"):
+        return f"refined_splat{refined_suffix}"
+    return f"refined_splat_{refined_suffix}"

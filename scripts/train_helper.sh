@@ -1,24 +1,23 @@
 #!/usr/bin/env bash
-# train_helper.sh - preprocess + train with the locked geo recipe (s6_ld50 lineage).
+# train_helper.sh - splatter train helper (no MoGe preprocess).
 #
-# Vendored for splatter-server Docker. Synced from LichtFeld-Studio train_helper
-# (locked 2026-09-25 after fair A/B + visual check):
-#   FastGS / mrnf / max_cap=1M / exposure off (opt-in via --exposure)
-#   NC=0.01 / flatten=0.5 / prior normals=0.05 / depth SSI=0.15 / Ld=50
-#   opacity_lr=0.006 / opacity_reg=0.0015 / scale_reg=0.001
-#   max_screen_share=0.2 / oversize_split=0.25 / normal_start=0.03
+# Locked 2026-10-25 (LFS v0.5.4.2 pin; L_d off by default):
+#   FastGS / mrnf / max_cap=1M / 30k / -r 2 / exposure on
+#   L_d off (optional --ld WEIGHT for experiments)
+#   NC=0.1 / flatten=0.1 / normal_start=LFS default (0.08) — see CAPABILITIES.md
+#   No MoGe preprocess, no SSI depth prior, no prior normals
+#   Densification: stock LichtFeld defaults (opacity_lr/regs/screen share)
 #   Config: config/lichtfeld_optimization_params.json
-#   Auto crop: scripts/auto_fit_cropbox.py (optional; --no-crop to skip)
-#
-# Node note (2026-09-25): default skips L_d CLI until the image binary is rebuilt
-# with --use-depth-distortion (LichtFeld >= 3693dfb73). Pass --ld 50 to enable.
+#   Crop: --cropbox x0,y0,z0,x1,y1,z1 (from node crop_aabb.py; --no-crop to skip)
 #
 # Usage:
 #   train_helper.sh <scene> <out>
-#   train_helper.sh -i 20000 -r 2 <scene> <out>
+#   train_helper.sh -i 30000 -r 2 <scene> <out>
 #   train_helper.sh --no-crop <scene> <out>
-#   train_helper.sh --ld 0 <scene> <out>
+#   train_helper.sh --no-exposure <scene> <out>
 #   train_helper.sh --ld 50 <scene> <out>
+#   train_helper.sh --init dense.ply <scene> <out>
+#   train_helper.sh --cropbox x0,y0,z0,x1,y1,z1 <scene> <out>
 #
 # Optional env:
 #   LFS_EXE / LICHTFELD_BIN  path to LichtFeld-Studio binary
@@ -32,16 +31,17 @@ HELPER_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LFS_ROOT="${LFS_ROOT:-/app/LichtFeld-Studio}"
 
 usage() {
-  echo "usage: $0 [-i iterations] [-r resize] [--exposure] [--no-crop] [--ld WEIGHT] <scene> <out>" >&2
+  echo "usage: $0 [-i iterations] [-r resize] [--init PLY] [--cropbox X0,Y0,Z0,X1,Y1,Z1] [--no-exposure] [--no-crop] [--ld WEIGHT] <scene> <out>" >&2
   exit 2
 }
 
 ITERATIONS=30000
 RESIZE_FACTOR=2
-EXPOSURE=0
+EXPOSURE=1
 USE_CROP=1
-# Empty / 0 = omit L_d CLI (compatible with pre-L_d binaries). Locked recipe is 50.
+CROPBOX=""
 LD_WEIGHT="0"
+INIT_PLY=""
 SCENE=""
 OUT=""
 
@@ -61,13 +61,27 @@ while [[ $# -gt 0 ]]; do
       EXPOSURE=1
       shift
       ;;
+    --no-exposure)
+      EXPOSURE=0
+      shift
+      ;;
     --no-crop)
       USE_CROP=0
       shift
       ;;
+    --cropbox)
+      [[ $# -ge 2 ]] || usage
+      CROPBOX="$2"
+      shift 2
+      ;;
     --ld|--depth-distortion-weight)
       [[ $# -ge 2 ]] || usage
       LD_WEIGHT="$2"
+      shift 2
+      ;;
+    --init)
+      [[ $# -ge 2 ]] || usage
+      INIT_PLY="$2"
       shift 2
       ;;
     -h|--help)
@@ -103,7 +117,6 @@ if ! [[ "${RESIZE_FACTOR}" =~ ^[0-9]+$ ]]; then
 fi
 
 CONFIG="${LICHTFELD_CONFIG:-${HELPER_DIR}/../config/lichtfeld_optimization_params.json}"
-CROP_PY="${HELPER_DIR}/auto_fit_cropbox.py"
 SUMMARY_PY="${LFS_ROOT}/scripts/train_helper_summary.py"
 
 resolve_exe() {
@@ -158,6 +171,20 @@ if [[ ! -d "${SCENE}/images" ]]; then
   exit 1
 fi
 
+scene_has_sidecar_masks() {
+  local masks_dir="${SCENE}/masks"
+  [[ -d "${masks_dir}" ]] || return 1
+  find "${masks_dir}" -type f \( \
+    -iname '*.png' -o -iname '*.jpg' -o -iname '*.jpeg' -o \
+    -iname '*.webp' -o -iname '*.bmp' -o -iname '*.tif' -o -iname '*.tiff' \
+  \) -print -quit | grep -q .
+}
+
+USE_SIDECAR_MASKS=0
+if scene_has_sidecar_masks; then
+  USE_SIDECAR_MASKS=1
+fi
+
 if [[ ! -f "${CONFIG}" ]]; then
   echo "error: train config missing: ${CONFIG}" >&2
   echo "       set LICHTFELD_CONFIG or place lichtfeld_optimization_params.json under config/" >&2
@@ -166,9 +193,8 @@ fi
 
 mkdir -p "${OUT}"
 
-echo "==> preprocess (MoGe-2 depth + normals)"
+echo "==> skip MoGe preprocess (self-supervised geo only; no depth/normal priors)"
 echo "    scene=${SCENE}"
-"${EXE}" preprocess "${SCENE}" --mode both
 
 if [[ "${EXPOSURE}" -eq 1 ]]; then
   EXPOSURE_LABEL=on
@@ -177,14 +203,21 @@ else
 fi
 
 if [[ -z "${LD_WEIGHT}" || "${LD_WEIGHT}" == "0" || "${LD_WEIGHT}" == "0.0" ]]; then
-  LD_LABEL="off (deferred until L_d binary)"
+  LD_LABEL="off"
 else
   LD_LABEL="${LD_WEIGHT}"
 fi
 
-echo "==> train geo recipe (s6_ld50 lineage)"
+echo "==> train self-supervised geo recipe"
 echo "    iters=${ITERATIONS}  resize=${RESIZE_FACTOR}  out=${OUT}"
-echo "    NC=0.01 flatten=0.5 prior_normals=0.05 depth_ssi=0.15 Ld=${LD_LABEL} exposure=${EXPOSURE_LABEL}"
+echo "    NC=0.1 flatten=0.1 start=LFS-default prior_normals=off depth_ssi=off Ld=${LD_LABEL} exposure=${EXPOSURE_LABEL}"
+if [[ -n "${INIT_PLY}" ]]; then
+  echo "    init=${INIT_PLY}"
+fi
+if [[ "${USE_SIDECAR_MASKS}" -eq 1 ]]; then
+  echo "    masks=${SCENE}/masks (mask-mode=ignore, no-alpha-as-mask)"
+fi
+echo "    densify=stock LFS defaults (opacity_lr=0.025 reg=0.01 screen_share=0.3 split=0.15)"
 echo "    config=${CONFIG}"
 echo "    export=ply,sog"
 
@@ -203,15 +236,10 @@ TRAIN_CMD=(
   --eval-steps "${ITERATIONS}"
   --export "ply,sog"
   --use-normal-loss
-  --normal-loss-weight 0.05
-  --normal-consistency-weight 0.01
-  --normal-flatten-weight 0.5
-  --normal-start-fraction 0.03
-  --use-depth-loss
-  --depth-loss-mode ssi
-  --depth-loss-weight 0.15
-  --max-screen-share 0.2
-  --oversize-split-fraction 0.25
+  --normal-loss-weight 0
+  --no-normal-auto-generate
+  --normal-consistency-weight 0.1
+  --normal-flatten-weight 0.1
   --quiet
 )
 
@@ -224,12 +252,25 @@ if [[ "${EXPOSURE}" -eq 1 ]]; then
   TRAIN_CMD+=(--exposure-correction)
 fi
 
-if [[ "${USE_CROP}" -eq 1 ]]; then
-  if [[ -f "${CROP_PY}" ]]; then
-    TRAIN_CMD+=(--python-script "${CROP_PY}")
-  else
-    echo "warning: crop script missing (${CROP_PY}); training without auto crop" >&2
+if [[ -n "${INIT_PLY}" ]]; then
+  if [[ ! -f "${INIT_PLY}" ]]; then
+    echo "error: init PLY missing: ${INIT_PLY}" >&2
+    exit 1
   fi
+  TRAIN_CMD+=(--init "${INIT_PLY}")
+fi
+
+if [[ "${USE_CROP}" -eq 1 ]]; then
+  if [[ -n "${CROPBOX}" ]]; then
+    echo "    cropbox=${CROPBOX}"
+    TRAIN_CMD+=(--cropbox "${CROPBOX}")
+  else
+    echo "warning: --crop enabled but no --cropbox; training without crop" >&2
+  fi
+fi
+
+if [[ "${USE_SIDECAR_MASKS}" -eq 1 ]]; then
+  TRAIN_CMD+=(--mask-mode ignore --no-alpha-as-mask)
 fi
 
 "${TRAIN_CMD[@]}"

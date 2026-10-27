@@ -24,6 +24,7 @@ import filter_splats
 import global_main
 import local_main
 import preprocessing
+import densify_init
 from combine_splats import PRE_ROTATION_MATRIX, transform_splat_data
 from artifact_naming import rename_for_domain_upload
 
@@ -72,16 +73,48 @@ def ensure_frames_for_scan(job_root: Path, scan_id: str) -> Path:
     return frames_dir
 
 
-def ensure_sfm_for_scan(job_root: Path, scan_id: str) -> Path:
-    sfm_dir = job_root / "refined" / "local" / scan_id / "sfm"
-    if sfm_dir.exists() and any(sfm_dir.iterdir()):
+def _is_colmap_model(path: Path) -> bool:
+    return (path / "cameras.bin").is_file() or (path / "cameras.txt").is_file()
+
+
+def _normalize_refined_sfm_layout(scan_dir: Path) -> Path:
+    """Match reconstruction-global: prefer scan/sfm/; lift flat legacy zip contents into sfm/."""
+    sfm_dir = scan_dir / "sfm"
+    if _is_colmap_model(sfm_dir):
         return sfm_dir
+    if _is_colmap_model(scan_dir):
+        sfm_dir.mkdir(parents=True, exist_ok=True)
+        for item in scan_dir.iterdir():
+            if not item.is_file():
+                continue
+            if item.suffix.lower() not in {".bin", ".csv", ".txt"}:
+                continue
+            dest = sfm_dir / item.name
+            if not dest.exists():
+                shutil.move(str(item), str(dest))
+        return sfm_dir
+    return sfm_dir
+
+
+def ensure_sfm_for_scan(job_root: Path, scan_id: str) -> Path:
+    """Unpack RefinedScan.zip into refined/local/<scan>/ (entries: sfm/, carve/, …)."""
+    scan_dir = job_root / "refined" / "local" / scan_id
+    sfm_dir = _normalize_refined_sfm_layout(scan_dir)
+    if _is_colmap_model(sfm_dir):
+        return sfm_dir
+
     zip_path = job_root / "datasets" / scan_id / "RefinedScan.zip"
     if not zip_path.exists():
         raise FileNotFoundError(f"missing sfm and RefinedScan.zip for scan {scan_id}")
-    sfm_dir.mkdir(parents=True, exist_ok=True)
+    scan_dir.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(str(zip_path), "r") as zf:
-        zf.extractall(sfm_dir)
+        zf.extractall(scan_dir)
+
+    sfm_dir = _normalize_refined_sfm_layout(scan_dir)
+    if not _is_colmap_model(sfm_dir):
+        raise FileNotFoundError(
+            f"RefinedScan.zip for scan {scan_id} has no COLMAP cameras.bin under {sfm_dir}"
+        )
     return sfm_dir
 
 
@@ -101,6 +134,7 @@ def _progress(stage: str, pct: int | None = None, detail: str = "") -> None:
 
 
 def run_colmap_single_splat(job_root: Path, iterations: int, enable_sparsity: bool) -> dict:
+    """DMT colmap/v1 product: densify+train recipe, then filter→rotate→``splat_rot.splat``."""
     scan_ids = discover_scan_ids(job_root)
     if not scan_ids:
         raise ValueError("no scans found in datasets")
@@ -141,15 +175,24 @@ def run_colmap_single_splat(job_root: Path, iterations: int, enable_sparsity: bo
     dense_dir.mkdir(parents=True, exist_ok=True)
     splat_dir.mkdir(parents=True, exist_ok=True)
 
-    _progress("preprocessing", 10, "bundle adjustment")
-    preprocessing.preprocess(colmap_dir, processed_dir, frames_dir=merged_frames, bundle_adjust=False)
-    _progress("preprocessing", 15, "undistorting images")
-    import pycolmap
-    pycolmap.undistort_images(
-        output_path=str(dense_dir),
-        input_path=str(processed_dir),
-        image_path=str(merged_frames),
-    )
+    init_ply = None
+    if densify_init.densify_enabled():
+        _progress("preprocessing", 10, "undistort for densify")
+        preprocessing.undistort_merged_colmap(
+            colmap_dir, processed_dir, merged_frames, dense_dir
+        )
+        _progress("densify", 12, "RoMa dense init")
+        init_ply = densify_init.run_densify(dense_dir)
+    else:
+        _progress("preprocessing", 10, "bundle adjustment")
+        preprocessing.preprocess(colmap_dir, processed_dir, frames_dir=merged_frames, bundle_adjust=False)
+        _progress("preprocessing", 15, "undistorting images")
+        import pycolmap
+        pycolmap.undistort_images(
+            output_path=str(dense_dir),
+            input_path=str(processed_dir),
+            image_path=str(merged_frames),
+        )
 
     colmap_sparse = dense_dir / "sparse"
     images_dir = dense_dir / "images"
@@ -162,7 +205,7 @@ def run_colmap_single_splat(job_root: Path, iterations: int, enable_sparsity: bo
         iterations=iterations,
         enable_sparsity=enable_sparsity,
         sparsify_steps=sparsify_steps,
-        init_ply=None,
+        init_ply=init_ply,
         use_train_helper=True,
     )
 
@@ -236,35 +279,27 @@ def run_local_only(
         enable_sparsity=enable_sparsity,
         sparsify_steps=15000 if enable_sparsity else 0,
         reuse_trained=reuse_trained,
-        convert_splat=convert_to_splat,
-        convert_sog=convert_to_sog,
+        do_convert_splat=convert_to_splat,
+        do_convert_sog=convert_to_sog,
         use_vda=False,
     )
 
     _progress("postprocessing", 90, "staging outputs")
     output_dir = job_root / "output"
-    # Local train_helper ignores sparsity; artifact names use iterations only.
+    # Local product path: SOG-only uploads (PLY/splat remain on disk for debug/reuse).
     produced = []
     for scan_id in scan_ids:
         splat_dir = job_root / "refined" / "local" / scan_id / "splat"
         base = f"splat_{iterations}.filtered"
-        if convert_to_splat:
-            splat_file = splat_dir / f"{base}.splat"
-            if splat_file.exists():
-                name = f"local_splat_{scan_id}.local_splat"
-                stage_output(output_dir, splat_file, name)
-                produced.append(name)
-        if convert_to_sog:
-            sog_file = splat_dir / f"{base}.sog"
-            if sog_file.exists():
-                name = f"local_splat_sog_{scan_id}.local_splat_sog"
-                stage_output(output_dir, sog_file, name)
-                produced.append(name)
-        ply_file = splat_dir / f"{base}.ply"
-        if ply_file.exists():
-            name = f"local_splat_ply_{scan_id}.local_splat_ply"
-            stage_output(output_dir, ply_file, name)
-            produced.append(name)
+        sog_file = splat_dir / f"{base}.sog"
+        if not sog_file.exists():
+            raise FileNotFoundError(
+                f"Local SOG product missing for {scan_id}: {sog_file} "
+                "(enable SOG conversion; local uploads are SOG-only)"
+            )
+        name = f"local_splat_sog_{scan_id}.local_splat_sog"
+        stage_output(output_dir, sog_file, name)
+        produced.append(name)
     _progress("done", 100)
     return {"scan_ids": scan_ids, "outputs": produced}
 
@@ -306,7 +341,7 @@ def run_global_only(
         for f in global_dir.iterdir():
             if not f.is_file():
                 continue
-            if f.suffix == ".sog" and not manifest_timestamp:
+            if not manifest_timestamp:
                 raise ValueError(
                     "manifest_timestamp is required to stage SOG partition outputs"
                 )
@@ -338,15 +373,19 @@ def main() -> None:
     parser.add_argument("--mode", required=True, choices=["colmap_v1_single_splat", "local_only", "global_only"])
     parser.add_argument("--job_root_path", type=Path, required=True)
     parser.add_argument("--scan_ids", type=str, default="")
-    parser.add_argument("--iterations", type=int, default=20000)
+    parser.add_argument("--iterations", type=int, default=30000)
     parser.add_argument("--enable_sparsity", action="store_true", default=False)
     parser.add_argument("--reuse_trained", action="store_true", default=False)
     parser.add_argument("--use_filtered", action="store_true", default=True)
     parser.add_argument("--no_use_filtered", action="store_true", default=False)
     parser.add_argument("--partition", action="store_true", default=True)
     parser.add_argument("--no_partition", action="store_true", default=False)
-    parser.add_argument("--partition_size", type=float, default=5.0)
-    parser.add_argument("--convert_to_splat", action="store_true", default=True)
+    parser.add_argument(
+        "--partition_size",
+        type=float,
+        default=float(os.environ.get("SPLATTER_PARTITION_SIZE", "10")),
+    )
+    parser.add_argument("--convert_to_splat", action="store_true", default=False)
     parser.add_argument("--no_convert_to_splat", action="store_true", default=False)
     parser.add_argument("--convert_to_sog", action="store_true", default=False)
     parser.add_argument(
@@ -364,7 +403,22 @@ def main() -> None:
     if args.mode == "colmap_v1_single_splat":
         run_colmap_single_splat(job_root, args.iterations, args.enable_sparsity)
     elif args.mode == "local_only":
-        convert_to_splat = args.convert_to_splat and not args.no_convert_to_splat
+        convert_flags = {
+            f
+            for f in sys.argv
+            if f
+            in {"--convert_to_sog", "--convert_to_splat", "--no_convert_to_splat"}
+        }
+        if convert_flags:
+            convert_to_splat = args.convert_to_splat and not args.no_convert_to_splat
+            convert_to_sog = args.convert_to_sog
+        else:
+            convert_to_sog = _bool_env("SPLATTER_CONVERT_TO_SOG", True)
+            convert_to_splat = _bool_env("SPLATTER_CONVERT_TO_SPLAT", False)
+        if not convert_to_sog:
+            raise ValueError(
+                "local_only requires SOG conversion (product uploads are SOG-only)"
+            )
         run_local_only(
             job_root=job_root,
             scan_ids=scan_ids,
@@ -372,7 +426,7 @@ def main() -> None:
             enable_sparsity=args.enable_sparsity,
             reuse_trained=args.reuse_trained,
             convert_to_splat=convert_to_splat,
-            convert_to_sog=args.convert_to_sog,
+            convert_to_sog=convert_to_sog,
         )
     else:
         use_filtered = args.use_filtered and not args.no_use_filtered

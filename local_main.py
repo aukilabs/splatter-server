@@ -12,6 +12,9 @@ import re
 import subprocess
 import open3d as o3d
 from preprocessing import run_bundle_adjustment, set_colmap_points_from_pointcloud, cleanup_rec_cameras
+import crop_aabb
+import black_pixel_masks
+import densify_init
 
 LICHTFELD_BIN = os.environ.get("LICHTFELD_BIN", "/app/LichtFeld-Studio/build/LichtFeld-Studio")
 LICHTFELD_TRAIN_HELPER = os.environ.get(
@@ -156,37 +159,48 @@ def _train_splat_legacy(
 
 
 def train_splat(colmap_dir: Path, output_dir: Path, images_dir: Path = None,
-                iterations: int = 20000,
+                iterations: int = 30000,
                 enable_sparsity: bool = False, sparsify_steps: int = 15000,
-                init_ply: Path = None, use_train_helper: bool = True):
+                init_ply: Path = None, use_train_helper: bool = True,
+                use_crop: bool = True):
     if not images_dir:
         images_dir = colmap_dir / "images"
 
     if use_train_helper:
-        # train_helper path: sparsity and VDA --init unsupported; recipe is
-        # s6_ld50 geo (config + helper CLI). L_d CLI skipped until image binary
-        # supports --use-depth-distortion (helper default --ld 0).
+        # train_helper path: sparsity unsupported. Recipe is LFS v0.5.4.2
+        # (L_d off), NC=0.1, flatten=0.1, normal_start=LFS default, exposure on.
         if enable_sparsity:
             print(
                 "[train_splat] enable_sparsity ignored on train_helper path",
                 flush=True,
             )
-        if init_ply is not None:
-            print(
-                "[train_splat] init_ply/--init ignored on train_helper path",
-                flush=True,
-            )
 
         scene_dir = _prepare_helper_scene(colmap_dir, images_dir)
+        black_pixel_masks.ensure_black_pixel_masks(scene_dir / "images", scene_dir=scene_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
         cmd = [
             LICHTFELD_TRAIN_HELPER,
             "-i", str(iterations),
             "-r", "2",
-            "--ld", "0",
             str(scene_dir),
             str(output_dir),
         ]
+        if init_ply is not None:
+            cmd.extend(["--init", str(init_ply)])
+        if not use_crop:
+            cmd.append("--no-crop")
+        else:
+            try:
+                cropbox = crop_aabb.compute_training_cropbox(
+                    init_ply=init_ply,
+                    colmap_dir=colmap_dir,
+                )
+                cmd.extend(["--cropbox", cropbox])
+            except (FileNotFoundError, ValueError) as exc:
+                print(
+                    f"[train_splat] crop AABB skipped ({exc}); training without --cropbox",
+                    flush=True,
+                )
         _run_training_cmd(cmd)
         return
 
@@ -200,10 +214,10 @@ def train_splat(colmap_dir: Path, output_dir: Path, images_dir: Path = None,
         init_ply,
     )
 
-def scan_main(job_root: Path, scan_id: str, iterations: int = 20000,
+def scan_main(job_root: Path, scan_id: str, iterations: int = 30000,
               enable_sparsity: bool = False, sparsify_steps: int = 15000,
               reuse_trained: bool = False, use_vda: bool = False,
-              convert_splat: bool = False, convert_sog: bool = False,
+              do_convert_splat: bool = False, do_convert_sog: bool = False,
               bundle_adjust: bool = False) -> None:
     start_time = time.time()
 
@@ -216,10 +230,16 @@ def scan_main(job_root: Path, scan_id: str, iterations: int = 20000,
         print("Splat reuse enabled, skip ahead to filtering")
     else:
         if not use_vda:
-            # BA off by default (intrinsics-only refine was a no-op for pose quality).
-            # Undistort still runs inside preprocessing.scan_main → dense/.
-            preprocessing.main(job_root, scan_id, bundle_adjust=bundle_adjust)
             init_ply = None
+            if densify_init.densify_enabled():
+                shutil.rmtree(splat_dir, ignore_errors=True)
+                splat_dir.mkdir(parents=True, exist_ok=True)
+                preprocessing.undistort_local_scan(job_root, scan_id)
+                dense_dir = job_root / "refined" / "local" / scan_id / "dense"
+                init_ply = densify_init.run_densify(dense_dir)
+            else:
+                # Legacy Splattr preprocess + undistort (no RoMa dense init).
+                preprocessing.main(job_root, scan_id, bundle_adjust=bundle_adjust)
         else:
             # Don't run the full preprocessing since the colmap 3D point
             # outlier filtering clears 2D/3D point relations.
@@ -285,9 +305,10 @@ def scan_main(job_root: Path, scan_id: str, iterations: int = 20000,
     if not filtered_ply.exists():
         raise FileNotFoundError(f"Filtered PLY was not produced: {filtered_ply}")
 
-    if convert_splat:
+    # Bool flags must not share names with the convert_splat module.
+    if do_convert_splat:
         convert_splat.convert_ply_to_splat(filtered_ply)
-    if convert_sog:
+    if do_convert_sog:
         convert_splat.convert_ply_to_sog(filtered_ply)
 
     end_time = time.time()
@@ -295,26 +316,34 @@ def scan_main(job_root: Path, scan_id: str, iterations: int = 20000,
 
 def main(job_root: Path,
          scan_ids: list[str],
-         iterations: int = 20000,
+         iterations: int = 30000,
          enable_sparsity: bool = False,
          sparsify_steps: int = 15000,
          reuse_trained: bool = False,
-         convert_splat: bool = False,
-         convert_sog: bool = False,
+         do_convert_splat: bool = False,
+         do_convert_sog: bool = False,
          use_vda: bool = False
 ) -> None:
     print(f"Use vda: {use_vda}")
     for scan_id in scan_ids:
-        scan_main(job_root, scan_id, iterations=iterations,
-                  enable_sparsity=enable_sparsity, sparsify_steps=sparsify_steps,
-                  reuse_trained=reuse_trained, use_vda=use_vda)
+        scan_main(
+            job_root,
+            scan_id,
+            iterations=iterations,
+            enable_sparsity=enable_sparsity,
+            sparsify_steps=sparsify_steps,
+            reuse_trained=reuse_trained,
+            do_convert_splat=do_convert_splat,
+            do_convert_sog=do_convert_sog,
+            use_vda=use_vda,
+        )
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--job-root", type=Path, required=True)
     parser.add_argument("--scan-id", type=str, default=None)
     parser.add_argument("--all-scan-ids", action="store_true", default=False)
-    parser.add_argument("--iterations", type=int, default=20000)
+    parser.add_argument("--iterations", type=int, default=30000)
     parser.add_argument("--reuse-trained", action="store_true", default=False)
     parser.add_argument("--enable-sparsity", action="store_true", default=False)
     parser.add_argument("--sparsify-steps", type=int, default=15000)
@@ -341,6 +370,6 @@ if __name__ == "__main__":
          enable_sparsity=args.enable_sparsity,
          sparsify_steps=args.sparsify_steps,
          reuse_trained=args.reuse_trained,
-         convert_splat=args.convert_splat,
-         convert_sog=args.convert_sog,
+         do_convert_splat=args.convert_splat,
+         do_convert_sog=args.convert_sog,
          use_vda=args.vda)

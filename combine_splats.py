@@ -17,7 +17,7 @@ Usage with job-root (recommended):
     - Discover scan IDs from job_root/datasets/
     - Read COLMAP Sim3 transforms from job_root/refined/global/refined_manifest.json
       (alignedScans or scanAlignmentTransforms)
-    - Load splats from job_root/refined/local/<scan_id>/splat/splat_20000.ply
+    - Load splats from job_root/refined/local/<scan_id>/splat/splat_30000.ply
     - Write output to job_root/refined/global/combined_splat.ply
 
 Usage with explicit files:
@@ -55,6 +55,8 @@ import numpy as np
 from numba import njit, prange
 from plyfile import PlyData, PlyElement
 from pycolmap import Sim3d, Rotation3d
+
+import convert_splat
 
 # =============================================================================
 # Numba-compiled math helpers (for performance-critical operations)
@@ -149,7 +151,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--use-filtered",
         action="store_true",
-        help="Use filtered splat (splat_20000.filtered.ply) if available, else fall back to original."
+        help="Use filtered splat (splat_30000.filtered.ply) if available, else fall back to original."
     )
     
     # Explicit file mode
@@ -166,8 +168,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--base-filename",
-        default="splat_20000",
-        help="Base filename of the splat files to combine. Default: splat_20000"
+        default="splat_30000",
+        help="Base filename of the splat files to combine. Default: splat_30000"
     )
     
     # Common options
@@ -419,16 +421,28 @@ def discover_scans_and_transforms(job_root: Path, scan_ids: Optional[list] = Non
 
     # Reconstruction historically used "alignedScans"; newer manifests may use
     # "scanAlignmentTransforms". Both hold {scan_id: {localToGlobalColmap: {...}}}.
+    # Some recon builds (e.g. v0.4.3 with portal_alignment_metrics) omit the block
+    # when local refined SFM is already written in the global COLMAP frame — then
+    # identity Sim3 is correct (verified on grocery-small: scan means meters apart).
     aligned_scans = (
         manifest.get("alignedScans")
         or manifest.get("scanAlignmentTransforms")
         or {}
     )
     if not aligned_scans:
-        raise ValueError(
-            "Manifest has no alignedScans or scanAlignmentTransforms; "
-            "cannot combine splats without COLMAP Sim3 alignment transforms."
+        print(
+            "WARNING: Manifest has no alignedScans or scanAlignmentTransforms; "
+            "using identity COLMAP Sim3 per scan (assume local SFM already global).",
+            file=sys.stderr,
         )
+        identity = {
+            "scale": "1.0",
+            "position": {"x": "0", "y": "0", "z": "0"},
+            "rotation": {"x": "0", "y": "0", "z": "0", "w": "1"},
+        }
+        aligned_scans = {
+            sid: {"localToGlobalColmap": dict(identity)} for sid in scan_ids
+        }
 
     result = {}
     for scan_id in scan_ids:
@@ -458,7 +472,18 @@ def discover_scans_and_transforms(job_root: Path, scan_ids: Optional[list] = Non
     return result
 
 
-def get_splat_path(job_root: Path, scan_id: str, use_filtered: bool, base_filename: str = "splat_20000") -> Optional[Path]:
+def load_splat_plydata(splat_path: Path) -> PlyData:
+    """Load Gaussian splat vertices from PLY or SOG (SOG is converted to a sidecar PLY)."""
+    splat_path = Path(splat_path)
+    if splat_path.suffix.lower() == ".sog":
+        import_path = splat_path.with_name(f"{splat_path.stem}_import.ply")
+        if not import_path.exists() or import_path.stat().st_mtime < splat_path.stat().st_mtime:
+            convert_splat.convert_sog_to_ply(splat_path, import_path)
+        return PlyData.read(str(import_path))
+    return PlyData.read(str(splat_path))
+
+
+def get_splat_path(job_root: Path, scan_id: str, use_filtered: bool, base_filename: str = "splat_30000") -> Optional[Path]:
     """Get the splat PLY path for a scan, preferring filtered version if requested."""
     splat_dir = job_root / "refined" / "local" / scan_id / "splat"
 
@@ -481,7 +506,7 @@ def get_splat_path(job_root: Path, scan_id: str, use_filtered: bool, base_filena
 def combine_splats_from_job_root(args: argparse.Namespace) -> None:
     """Process splats using job-root discovery."""
     job_root = args.job_root
-    base_filename = args.base_filename if "base_filename" in args.__dict__ else "splat_20000"
+    base_filename = args.base_filename if "base_filename" in args.__dict__ else "splat_30000"
 
     # Discover scans and transforms
     scans = discover_scans_and_transforms(job_root, args.scan_ids)
@@ -513,7 +538,7 @@ def combine_splats_from_job_root(args: argparse.Namespace) -> None:
         transform_data = info["transform"]
         
         print(f"\nLoading splat: {splat_path}")
-        ply = PlyData.read(str(splat_path))
+        ply = load_splat_plydata(splat_path)
         
         if "vertex" not in ply:
             print(f"Warning: {splat_path} has no vertex element, skipping.", file=sys.stderr)
@@ -575,7 +600,7 @@ def combine_splats_explicit(args: argparse.Namespace) -> None:
             )
         
         print(f"Loading splat: {splat_path}")
-        ply = PlyData.read(str(splat_path))
+        ply = load_splat_plydata(splat_path)
         
         if "vertex" not in ply:
             print(f"Warning: {splat_path} has no vertex element, skipping.", file=sys.stderr)

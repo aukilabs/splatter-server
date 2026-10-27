@@ -1,13 +1,15 @@
 # Initiative: Splat quality via local+global R2
 
-Status: active  
+Status: done  
 Tier: feature  
-Stage: 6-breakdown  
+Stage: 11-release  
 Skips: _(none)_  
-Last updated: 2026-09-17
+Last updated: 2026-10-25
 
 Living document — update in place when later work changes earlier conclusions.  
 **§1 Intent (feature) and §4 System design stay distinct — never merge.**
+
+**2026-09-25 bounce (trainer recipe):** R2 replaced by **s6_ld50 geo** — SSI depth **0.15**, \(L_d\)=**50**, NC=0.01 / flatten=0.5 / prior normals=0.05, opacity_lr=0.006, exposure off, MoGe preprocess kept. Vendored `scripts/train_helper.sh` + `config/lichtfeld_optimization_params.json` + `scripts/auto_fit_cropbox.py`. Docker `LICHTFELD_GIT_REF` → `3693dfb73` (requires that commit on the LichtFeld remote before image rebuild). Overlay rebuild alone is insufficient if the base binary predates \(L_d\).
 
 ---
 
@@ -22,8 +24,9 @@ Living document — update in place when later work changes earlier conclusions.
   3. On-disk layout stays compatible with the existing local/global job split (no deep path rewrites).
   4. `/splatter/colmap/v1` stays **all-in-one** (same inputs/outputs); trainer switches to `train_helper` R2; post-process + `refined_splat_*` upload unchanged.
   5. Visual/quality bar is “can resume the effort” — not necessarily multi-scene LEP CI yet.
+  6. **Local task inputs in the task spec** (2026-09-18): `/splatter/local/v1` accepts **direct** `dmt_recording` (mp4) + `refined_scan_zip` URLs in `inputsCids` (same idea as refinement / Colmap direct files). DMT can drop `local_splat_input_*` envelope uploads.
 
-**§1 locked** (re-lock after bounce, 2026-09-16).
+**§1 locked** (re-lock after bounce, 2026-09-18).
 
 ## 2. Alternatives
 
@@ -66,13 +69,27 @@ Living document — update in place when later work changes earlier conclusions.
 ### Global outputs
 
 - Keep combine → partition pipeline.
-- **Product upload (locked):** **SOG-only** partitioned artifacts (`splat_partition_sog_*`). Do **not** upload `.splat` partitions on `/splatter/global/v1` for this path.
+- **Product upload (locked):** **SOG-only** partitioned artifacts (`dataType=splat_partition_sog`). Do **not** upload `.splat` partitions on `/splatter/global/v1` for this path.
 - Flip runner defaults: enable SOG conversion; disable `.splat` conversion/upload for global (today `SPLATTER_CONVERT_TO_SOG` defaults false; `.splat` defaults true — invert for this capability).
 - Local capability still stages/uploads local artifacts needed for the distributed handoff (unchanged contract).
 
+### Global coarse + fine LOD (locked 2026-09-17)
+
+Port Fairprice offline workflow into `/splatter/global/v1` (not LichtFeld SSOG hierarchy):
+
+1. After `combine` → `combined_splat.ply`, **split** via `filter_splats` `--output-ply-2`:
+   - **coarse** = kept: `--opacity-space sigmoid --min-opacity 0.6 --min-size 0.01`
+   - **fine** = removed remainder
+2. Partition **each** LOD at **10 m** (Fairprice exact; replaces prior 5 m default for global product tiles).
+3. Convert partitions to SOG; stage/upload both LODs.
+4. Domain names: `splat_partition_{coarse|fine}_{size}_{x}_{z}_{manifestTimestamp}` (`dataType` still `splat_partition_sog`).
+5. **Drop `full`** — do not emit `splat_partition_full_*` on the product path.
+6. Local/colmap post-cleanup filters stay as today (handoff cleanup); LOD split is a **second** filter on the combined hub only.
+7. Reference: `D:\splatter-node\worker\` Fairprice (`filter_splats --output-ply-2`, `upload_global.py`, rename in `worker.py`).
+
 ### Interfaces (capabilities)
 
-- `/splatter/local/v1` — inputs unchanged (`dmt_recording_*`, `refined_scan_*`); training via helper.
+- `/splatter/local/v1` — training via helper. **Inputs (locked 2026-09-18):** prefer **direct** dataset URLs in `inputsCids` — one or more `dmt_recording_*` (mp4) + matching `refined_scan_*` (zip), same layout as refinement. Still accept legacy JSON `{ "dataIDs": [...] }` envelope (and name resolution inside that envelope). Scan folder id from **artifact name / data_type**, not path stem. Do **not** require `local_splat_input_*`.
 - `/splatter/global/v1` — inputs unchanged; outputs **partitioned SOG only**; update `CAPABILITIES.md` if defaults/docs diverge.
 - `/splatter/colmap/v1` — inputs/outputs unchanged (`refined_splat_*`); `run_colmap_single_splat` calls `train_splat(..., use_train_helper=True)`; PLY name `splat_{iterations}.ply` (sparsity ignored on helper); keep filter → rotate → `.splat` convert.
 
@@ -84,7 +101,7 @@ Living document — update in place when later work changes earlier conclusions.
 - Filename coupling: helper writes `splat_${ITERATIONS}.ply`; local filter/global/colmap expect consistent `base_filename` — keep aligned at 20000.
 - Running in-flight colmap jobs on old image keep MCMC until container rebuild/restart.
 
-**§4 locked** (2026-09-16 bounce): `train_helper.sh` + `-i` as today (default 20000) + `-r 2`; no custom config/exposure; global **SOG-only**; colmap all-in-one + same helper.
+**§4 locked** (2026-09-18 bounce): `train_helper.sh` + `-i` as today (default 20000) + `-r 2`; no custom config/exposure; global **SOG-only** + **coarse/fine** Fairprice split (sigmoid 0.6 / min_size 0.01 / **10 m** tiles; drop `full`); colmap all-in-one + same helper; **LocalV1 direct mp4+zip in task `inputsCids`**.
 
 ## 5. Verification design
 
@@ -102,11 +119,11 @@ Living document — update in place when later work changes earlier conclusions.
 2. **Local capability**
    - `/splatter/local/v1` on a real (or modified-DMT) job produces per-scan `splat_20000.ply` (or `splat_<N>.ply` matching N) under the existing local layout and stages handoff artifacts as today.
 
-3. **Global capability — SOG-only**
-   - `/splatter/global/v1` combine → partition succeeds.
+3. **Global capability — SOG-only + coarse/fine**
+   - `/splatter/global/v1` combine → LOD split → partition **10 m** succeeds.
    - Uploaded/product artifacts include partitioned **SOG** with domain names  
-     `splat_partition_full_{size}_{x}_{z}_{manifestTimestamp}` and `dataType=splat_partition_sog`.
-   - **No** partitioned `.splat` uploads on this path.
+     `splat_partition_{coarse|fine}_{size}_{x}_{z}_{manifestTimestamp}` and `dataType=splat_partition_sog`.
+   - **No** `splat_partition_full_*`; **no** partitioned `.splat` uploads on this path.
    - `/splatter/colmap/v1` trains via helper (`-i`, `-r 2`; no `--config`/`--ppisp`); post-process still produces `.splat` / `refined_splat_*`.
 
 4. **End-to-end quality gate (human)**
@@ -118,11 +135,13 @@ Living document — update in place when later work changes earlier conclusions.
 | ID | Check | How |
 |----|--------|-----|
 | V1 | Helper argv contract | Unit/integration or log assert: command line contains `-i`, `-r 2`; lacks `--config`/`--exposure`/`--ppisp` |
-| V2 | Artifact names | After local: `splat_<iters>.ply` present; after global: staged `splat_partition_full_*_{manifestTimestamp}.splat_partition_sog` (dataType `splat_partition_sog`); no product `splat_partition_*.splat` upload |
+| V2 | Artifact names | After local: `splat_<iters>.ply` present; after global: staged `splat_partition_{coarse\|fine}_*_{manifestTimestamp}.splat_partition_sog` (dataType `splat_partition_sog`); no `full`; no product `splat_partition_*.splat` upload |
 | V3 | Colmap helper | `run_colmap_single_splat` uses `use_train_helper=True`; PLY `splat_<iters>`; filter/rotate/`.splat` still present |
 | V4 | Docker build | Image build succeeds on CI or local GPU builder |
 | V5 | Human E2E | Record run id / paths + pass/fail note on plan after visual check |
-| V6 | Naming unit | `rename_for_domain_upload` maps `combined_splat_partition_{size}_{x}_{z}.sog` + timestamp → `splat_partition_full_{size}_{x}_{z}_{timestamp}.splat_partition_sog` |
+| V6 | Naming unit | `rename_for_domain_upload` maps LOD partition SOGs + timestamp → `splat_partition_{coarse\|fine}_{size}_{x}_{z}_{timestamp}.splat_partition_sog` |
+| V7 | LOD split | After combine: coarse/fine PLYs exist; split uses sigmoid 0.6 + min_size 0.01; partition_size default 10 |
+| V8 | LocalV1 direct inputs | Static/code: LocalV1 non-JSON mp4/zip URLs materialize to `datasets/<scan>/Frames.mp4` + `RefinedScan.zip` using name-derived scan id; JSON envelope path still works; CAPABILITIES documents both |
 
 ### Out of scope for v1 verify
 
@@ -130,7 +149,7 @@ Living document — update in place when later work changes earlier conclusions.
 - Stock DMT (unmodified) calling local/global.
 - Performance/SLA for MoGe+20k mrnf.
 
-**§5 locked** (2026-09-16 bounce).
+**§5 locked** (2026-09-18 bounce: added V8 LocalV1 direct inputs).
 
 ## 6. Work breakdown (AI-oriented)
 
@@ -145,12 +164,14 @@ Ordered; one implementer subagent per agent slice. Stop/escalate → `/bounce-pl
 | **S5** | Colmap → `train_helper` | agent | S2 | `run_colmap_single_splat`: `use_train_helper=True`; PLY = `splat_{iterations}` (sparsity ignored on helper); keep filter/rotate/`.splat`; update `CAPABILITIES.md` | `splatter_pipeline.py`, docs | V3 | no |
 | **S6** | COLMAP `scanAlignmentTransforms` | agent | — | Product `combine_splats`: treat transforms as COLMAP Sim3; hard-fail if missing; scrub robin-experiments GL leftovers | `combine_splats.py` | py_compile | no |
 | **S7** | Domain SOG naming | agent | S3 | Rename staged global SOG to `splat_partition_full_{size}_{x}_{z}_{manifestTimestamp}.splat_partition_sog`; pass refined-manifest timestamp from Rust into staging; update `CAPABILITIES.md`. No coarse/fine generation. No re-upload of old jobs. | `artifact_naming.py`, `splatter_pipeline.py`, runner `lib.rs`, docs | V2, V6 | no |
+| **S8** | Global coarse+fine LOD | agent | S7 | Port Fairprice: restore `--output-ply-2` in `filter_splats`; after combine split coarse/fine (sigmoid 0.6, min_size 0.01); partition both at **10 m**; SOG both; domain names `splat_partition_{coarse\|fine}_…`; **drop `full`**; update `CAPABILITIES.md` / defaults | `filter_splats.py`, `global_main.py`, `artifact_naming.py`, `splatter_pipeline.py`, `partition_splat.py` defaults, docs | V2, V6, V7 | no |
+| **S9** | LocalV1 direct dataset inputs | agent | — | Extend LocalV1 so `inputsCids` may be full domain URLs to mp4 + `refined_scan_zip` (mirror Colmap direct-file path); derive scan id from artifact name/type; keep JSON `{dataIDs}` envelope; update `CAPABILITIES.md`. DMT drops `local_splat_input_*` after this. | `server/rust/runner/src/lib.rs`, `CAPABILITIES.md` | V8 | no |
 
 **Stop conditions:** helper/API flag drift; global still emits `.splat` products; quality fail on S4 → bounce recipe (§4).
 
-**Approvals:** **mass-approve all remaining** (2026-09-14) — S1→S3 agent slices + S4 human. **S5** approved 2026-09-16 (“Good implement” + full Docker rebuild, not r2-overlay). **S6** approved 2026-09-17. **S7** approved 2026-09-17 (option 1: naming + CAPABILITIES only; no re-stage). Still one implementer per slice with review/verify between slices.
+**Approvals:** **mass-approve all remaining** (2026-09-14) — S1→S3 agent slices + S4 human. **S5** approved 2026-09-16 (“Good implement” + full Docker rebuild, not r2-overlay). **S6** approved 2026-09-17. **S7** approved 2026-09-17 (option 1: naming + CAPABILITIES only; no re-stage). **S8** mass-approved 2026-09-17 (option 2: all remaining) — Fairprice-exact coarse+fine + 10 m. **S9** mass-approved 2026-09-18 (option 2). Still one implementer per slice with review/verify between slices.
 
-**§6 locked** (2026-09-17: added S7 naming).
+**§6 locked** (2026-09-18: added S9 LocalV1 direct inputs).
 
 ### Slice progress
 
@@ -161,6 +182,8 @@ Ordered; one implementer subagent per agent slice. Stop/escalate → `/bounce-pl
 - **S5** (2026-09-16): **done** — `use_train_helper=True`; `splat_{iterations}` naming; filter/rotate/`.splat` kept; CAPABILITIES updated. Review approve + V3 verify pass. Image includes S5 wiring.
 - **S6** (2026-09-17): **done** — COLMAP Sim3 framing; hard-fail missing transforms.
 - **S7** (2026-09-17): **done** — domain SOG naming `splat_partition_full_{size}_{x}_{z}_{manifestTimestamp}.splat_partition_sog`; Rust passes refined-manifest timestamp (including dataIDs name path); CAPABILITIES updated. Review revise→approve; V2/V6 verify **pass**.
+- **S8** (2026-09-17): **done** — Fairprice exact coarse+fine on global (sigmoid 0.6 / min_size 0.01 / 10 m); drop `full`. Review approve; V2/V6/V7 verify **pass**.
+- **S9** (2026-09-18): **done** — LocalV1 direct mp4+zip in task `inputsCids`; JSON envelope kept. Review approve; V8 verify **pass**.
 
 ## Notes / discovery
 
@@ -168,6 +191,9 @@ Ordered; one implementer subagent per agent slice. Stop/escalate → `/bounce-pl
 
 - **2026-09-14:** During §4, learned stock/legacy colmap jobs do **not** receive `refined_scan_*` / `refined_manifest*`. Sequential local→global on `/splatter/colmap/v1` would require a DMT change anyway. Human: **leave legacy colmap unchanged**; ship via **local + global** and test with a **modified DMT**. Supersedes prior draft that routed quality through colmap, and the in-progress decision to change colmap uploads to partitioned SOG.
 - **2026-09-16:** Human: stock path still hits colmap; keep all-in-one + post-process, but train with same R2 `train_helper` as local. Reopens §1/§4/§5/§6; adds **S5**. Does **not** turn colmap into local→global.
+- **2026-09-17:** Human: lag vs Fairprice; port coarse+fine into global; **Fairprice exact** (sigmoid 0.6, min_size 0.01, **10 m** tiles); drop `full`. Reopens §4 global outputs + §5 V2/V6 + adds **S8**.
+- **2026-09-18:** Human + DMT: `local_splat_input_*` was a workaround because LocalV1 requires a JSON envelope; cleanest path is **put mp4 + refined_scan_zip URLs in the task** (like refinement). Reopens §1/§4/§5; adds **S9**.
+- **2026-09-18:** Human: DMT splat looked worse; dial back local/colmap post-filter opacity from logit `-2.2` (≈0.10) to `-3.5` (≈0.03, slightly above train 0.02). Size/view filters unchanged. Global coarse/fine LOD split unchanged.
 
 ### What DMT hits today
 

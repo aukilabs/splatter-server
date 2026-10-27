@@ -19,7 +19,7 @@ import convert_splat
 
 
 def combine(job_root: Path, scan_ids: list[str], use_filtered: bool = True,
-            base_filename: str = "splat_20000") -> Path:
+            base_filename: str = "splat_30000") -> Path:
     """Combine splats from multiple scans into a single file."""
     print(f"[global] Combining splats from {len(scan_ids)} scans...")
     
@@ -125,10 +125,10 @@ def convert_aligned_scans(job_root: Path, to_splat: bool = True, to_sog: bool = 
 
 
 def main(job_root: Path, scan_ids: list[str],
-         base_filename: str = "splat_20000",
+         base_filename: str = "splat_30000",
          sparsify_steps: int = 0,
          use_filtered: bool = True,
-         do_partition: bool = True, partition_size: float = 5.0,
+         do_partition: bool = True, partition_size: float = 10.0,
          do_convert_splat: bool = True, do_convert_sog: bool = False) -> dict:
     """
     Run global splat processing pipeline.
@@ -173,11 +173,11 @@ if __name__ == "__main__":
     parser.add_argument("--job-root", type=Path, required=True)
     parser.add_argument("--scan-ids", type=str, nargs="+", default=None,
                         help="Scan IDs to process (default: all in datasets/)")
-    parser.add_argument("--base-filename", type=str, default="splat_20000")
+    parser.add_argument("--base-filename", type=str, default="splat_30000")
     parser.add_argument("--sparsify-steps", type=int, default=0)
     parser.add_argument("--use-filtered", action="store_true", default=True)
     parser.add_argument("--no-partition", action="store_true", default=False)
-    parser.add_argument("--partition-size", type=float, default=5.0)
+    parser.add_argument("--partition-size", type=float, default=10.0)
     parser.add_argument("--convert-splat", action="store_true", default=True)
     parser.add_argument("--convert-sog", action="store_true", default=False)
     
