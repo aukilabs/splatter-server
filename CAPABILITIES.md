@@ -41,6 +41,7 @@ Product **local** + **colmap** paths: Splattr **`preprocessing.main`** / **`prep
 | `min_opacity` (train) | stock LFS **0.005** |
 | `max_screen_share` / oversize split | stock LFS **0.3** / **0.15** |
 | Exposure | **on** (helper `--no-exposure` to disable) |
+| Train background | **`bg_mode=random`** (per-pixel noise each iter; not solid black / not modulation) |
 | Preprocess (in helper) | **none** (no MoGe / depth priors) |
 | Crop | Node `crop_aabb.py`: **1% per-axis trim + 0.3 m pad** on init/dense PLY (else COLMAP points3D) → `train_helper.sh --cropbox x0,y0,z0,x1,y1,z1`; `--no-crop` to skip |
 | Occlusion masks | Before train, `black_pixel_masks.py` scans scene images; pure-black pixels → sidecar **`masks/`** (same relative paths as images; **0=ignore, 255=keep**). When any mask exists, helper adds **`--mask-mode ignore`** and **`--no-alpha-as-mask`**. |

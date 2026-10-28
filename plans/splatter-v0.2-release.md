@@ -59,6 +59,7 @@ Living document — update in place when later work changes earlier conclusions.
 | Strategy / max_cap | **mrnf** / **1M** |
 | Iters / resize | **30000** / **-r 2** |
 | Exposure | **on** |
+| Train background | **`bg_mode=random`** (not solid black; avoids transparent-as-dark) |
 | MoGe / SSI / \(L_d\) / prior normals | **off** |
 | NC / flatten | **0.1** / **0.1** |
 | `normal_start_fraction` | **LFS default (0.08)** |
@@ -142,6 +143,7 @@ Same train recipe (no densify); upload **`.splat` / `refined_splat_*`**.
 - **Auto mode: on** — mass-approve S16–S17 (2026-10-28).
 - **Bounce #1 (2026-10-28):** densify off; BA on; max_cap 1.5M; POPSpa 750k.
 - **Bounce #2 (2026-10-28):** human visual on `splatter-v02-popspa` — POPSpa made it worse → **POPSpa off**, **max_cap 1M**. Keep densify out; keep BA.
+- **Bounce #3 (2026-10-28):** train **`bg_mode=random`** (was solid_color/black); holes were reading as transparent instead of dark.
 - Prior compare pages kept as historical evidence (`splatter-v02-densify`, `splatter-v02-popspa`, `splatter-v02-s8`).
 - Praxis: implementer → review → verify per slice; subagents **composer-2.5** / `composer-2.5-fast`.
 - **S15 smoke fail fix retained:** `train_helper` `--output-name splat_${ITERATIONS}` (harmless without POPSpa).

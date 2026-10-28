@@ -54,7 +54,7 @@
     "densify_error_map": "ssim_cs",
     "max_screen_share": 0.3,
     "oversize_split_fraction": 0.15,
-    "bg_mode": "solid_color",
+    "bg_mode": "random",
     "bg_modulation": false,
     "use_exposure_correction": true,
     "use_bilateral_grid": false,

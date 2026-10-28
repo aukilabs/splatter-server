@@ -17,6 +17,9 @@ class TrainHelperRecipeContractTest(unittest.TestCase):
         self.assertEqual(opt["popspa_target_count"], 750_000)
         self.assertEqual(opt["sparsify_steps"], 5000)
         self.assertEqual(opt["refine_steps"], 5000)
+        # Product train uses random bg so holes don't learn "transparent = black".
+        self.assertEqual(opt["bg_mode"], "random")
+        self.assertFalse(opt["bg_modulation"])
 
     def test_train_helper_argv_recipe(self):
         text = TRAIN_HELPER.read_text(encoding="utf-8")
