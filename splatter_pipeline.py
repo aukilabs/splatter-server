@@ -24,7 +24,6 @@ import filter_splats
 import global_main
 import local_main
 import preprocessing
-import densify_init
 from combine_splats import PRE_ROTATION_MATRIX, transform_splat_data
 from artifact_naming import rename_for_domain_upload
 
@@ -134,7 +133,7 @@ def _progress(stage: str, pct: int | None = None, detail: str = "") -> None:
 
 
 def run_colmap_single_splat(job_root: Path, iterations: int, enable_sparsity: bool) -> dict:
-    """DMT colmap/v1 product: densify+train recipe, then filter→rotate→``splat_rot.splat``."""
+    """DMT colmap/v1 product: Splattr preprocess + train, then filter→rotate→``splat_rot.splat``."""
     scan_ids = discover_scan_ids(job_root)
     if not scan_ids:
         raise ValueError("no scans found in datasets")
@@ -175,24 +174,17 @@ def run_colmap_single_splat(job_root: Path, iterations: int, enable_sparsity: bo
     dense_dir.mkdir(parents=True, exist_ok=True)
     splat_dir.mkdir(parents=True, exist_ok=True)
 
-    init_ply = None
-    if densify_init.densify_enabled():
-        _progress("preprocessing", 10, "undistort for densify")
-        preprocessing.undistort_merged_colmap(
-            colmap_dir, processed_dir, merged_frames, dense_dir
-        )
-        _progress("densify", 12, "RoMa dense init")
-        init_ply = densify_init.run_densify(dense_dir)
-    else:
-        _progress("preprocessing", 10, "bundle adjustment")
-        preprocessing.preprocess(colmap_dir, processed_dir, frames_dir=merged_frames, bundle_adjust=False)
-        _progress("preprocessing", 15, "undistorting images")
-        import pycolmap
-        pycolmap.undistort_images(
-            output_path=str(dense_dir),
-            input_path=str(processed_dir),
-            image_path=str(merged_frames),
-        )
+    _progress("preprocessing", 10, "bundle adjustment")
+    preprocessing.preprocess(
+        colmap_dir, processed_dir, frames_dir=merged_frames, bundle_adjust=True
+    )
+    _progress("preprocessing", 15, "undistorting images")
+    import pycolmap
+    pycolmap.undistort_images(
+        output_path=str(dense_dir),
+        input_path=str(processed_dir),
+        image_path=str(merged_frames),
+    )
 
     colmap_sparse = dense_dir / "sparse"
     images_dir = dense_dir / "images"
@@ -205,7 +197,6 @@ def run_colmap_single_splat(job_root: Path, iterations: int, enable_sparsity: bo
         iterations=iterations,
         enable_sparsity=enable_sparsity,
         sparsify_steps=sparsify_steps,
-        init_ply=init_ply,
         use_train_helper=True,
     )
 
@@ -281,7 +272,6 @@ def run_local_only(
         reuse_trained=reuse_trained,
         do_convert_splat=convert_to_splat,
         do_convert_sog=convert_to_sog,
-        use_vda=False,
     )
 
     _progress("postprocessing", 90, "staging outputs")
@@ -374,7 +364,18 @@ def main() -> None:
     parser.add_argument("--job_root_path", type=Path, required=True)
     parser.add_argument("--scan_ids", type=str, default="")
     parser.add_argument("--iterations", type=int, default=30000)
-    parser.add_argument("--enable_sparsity", action="store_true", default=False)
+    parser.add_argument(
+        "--enable_sparsity",
+        action="store_true",
+        default=_bool_env("SPLATTER_ENABLE_SPARSITY", True),
+        help="POPSpa after train (default on; set SPLATTER_ENABLE_SPARSITY=0 to disable)",
+    )
+    parser.add_argument(
+        "--no_enable_sparsity",
+        action="store_true",
+        default=False,
+        help="Disable POPSpa even if env default is on",
+    )
     parser.add_argument("--reuse_trained", action="store_true", default=False)
     parser.add_argument("--use_filtered", action="store_true", default=True)
     parser.add_argument("--no_use_filtered", action="store_true", default=False)
@@ -395,13 +396,14 @@ def main() -> None:
         help="Suffix from refined_manifest_* (e.g. 2026-09-17_14-55-56) for domain SOG naming",
     )
     args = parser.parse_args()
+    enable_sparsity = args.enable_sparsity and not args.no_enable_sparsity
 
     job_root = args.job_root_path
     job_root.mkdir(parents=True, exist_ok=True)
     scan_ids = parse_scan_ids(args.scan_ids)
 
     if args.mode == "colmap_v1_single_splat":
-        run_colmap_single_splat(job_root, args.iterations, args.enable_sparsity)
+        run_colmap_single_splat(job_root, args.iterations, enable_sparsity)
     elif args.mode == "local_only":
         convert_flags = {
             f
@@ -423,7 +425,7 @@ def main() -> None:
             job_root=job_root,
             scan_ids=scan_ids,
             iterations=args.iterations,
-            enable_sparsity=args.enable_sparsity,
+            enable_sparsity=enable_sparsity,
             reuse_trained=args.reuse_trained,
             convert_to_splat=convert_to_splat,
             convert_to_sog=convert_to_sog,

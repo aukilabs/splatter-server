@@ -2,6 +2,11 @@
 
 This document defines the runtime contract for the splatter capabilities implemented by the Rust runner.
 
+## Docker images (v0.2)
+
+- **Full image:** multi-stage `Dockerfile` (rust → LichtFeld build → lean runtime without `/app/vcpkg`). Tag e.g. `splatter-server:v0.2-dev`; rebuild when LichtFeld pin or base CUDA stack changes.
+- **Fast iter:** `Dockerfile.r2-overlay` on `splatter-server:v0.2-dev` — Rust binary, pipeline Python, helper, config; pass `--build-arg INSTALL_REQUIREMENTS=1` to refresh `requirements.txt` in the venv without a full rebuild.
+
 ## Product artifact split (v0.2)
 
 | Capability | Product upload format | Typical artifact names |
@@ -14,40 +19,29 @@ Colmap keeps the v0.1 **filter → rotate → `.splat`** contract for DMT. Local
 
 ## Trainer recipe (local + colmap)
 
-Locked 2026-10-25 (LichtFeld Studio **v0.5.4.2**; no monodepth priors; train-time densify = stock LFS defaults):
+Locked 2026-10-28 (LichtFeld Studio **v0.5.4.2**; Splattr preprocess + short bundle adjustment; no RoMa densify; no monodepth priors; train-time Gaussian densification = stock LFS defaults):
 
-### RoMa dense init (pre-train)
-
-| Knob | Value |
-|---|---|
-| Plugin | [Lichtfeld-Densification-Plugin](https://github.com/shadygm/Lichtfeld-Densification-Plugin) |
-| RoMa setting | **`turbo`** (`DENSIFY_ROMA_SETTING`) |
-| Reference fraction | **`0.6`** (`DENSIFY_NUM_REFS`) |
-| Output | Dense PLY → train **`--init`** (sparse COLMAP unchanged) |
-| Disable | `SPLATTER_DENSIFY=0` (legacy Splattr preprocess path) |
-| Plugin root | `DENSIFY_PLUGIN_ROOT` (default `/app/Lichtfeld-Densification-Plugin`; cloned at Docker build, pin `DENSIFY_PLUGIN_GIT_REF`) |
-| Densify Python | `DENSIFY_PYTHON` (default `/opt/densify-venv/bin/python` — **not** `/app/venv`; keeps train `pycolmap==3.13` isolated from plugin `pycolmap` 4.x) |
-| RoMa v2 weights | Baked to `${TORCH_HOME}/hub/checkpoints/romav2.pt` (`TORCH_HOME=/opt/densify-venv/.torch` in image). Build arg `ROMA_WEIGHTS_URL` (default [Parskatt release](https://github.com/Parskatt/RoMaV2/releases/download/weights/romav2.pt)); empty URL fails the image build |
-
-Product **local** + **colmap** paths: undistort-only staging → densify CLI → `train_helper.sh --init <dense_init.ply>`.
+Product **local** + **colmap** paths: Splattr **`preprocessing.main`** / **`preprocess` + undistort** (bundle adjustment **on** by default) → sparse COLMAP in `dense/` → `train_helper.sh` (no custom `--init`).
 
 | Knob | Value |
 |---|---|
 | LichtFeld pin | **v0.5.4.2** (Docker `LICHTFELD_GIT_REF`) |
 | Strategy | `mrnf` / FastGS, `max_cap=1M` |
+| POPSpa sparsity | **off** by default (`SPLATTER_ENABLE_SPARSITY=0`); optional **`--enable-sparsity`** / env **`SPLATTER_ENABLE_SPARSITY=1`** for experiments — then **`popspa_target_count=750000`** (env `POPSPA_TARGET_COUNT`) and stock LFS phase lengths (`sparsify_steps` / `refine_steps` **5000** in config) |
+| Export name | Helper passes LFS `--output-name splat_<iters>` (stable stem; harmless when POPSpa is off; avoids rename if sparsity is enabled) |
 | Iterations / resize | **30000** / **-r 2** |
 | Depth prior (SSI) | **off** |
 | Depth distortion \(L_d\) | **off** (optional `--ld` override in helper) |
 | MoGe preprocess | **off** (not baked in product image) |
 | NC / flatten / prior normals | **0.1** / **0.1** / **off** |
 | `normal_start_fraction` | **LFS default (0.08)** — not overridden |
-| Dense init (`--init`) | Passed through helper when `init_ply` is set |
+| Custom dense init (`--init`) | Not used on product path; helper still accepts `--init` for manual experiments |
 | Opacity LR / reg | stock LFS **0.025** / **0.01** |
 | Scale reg / decay | stock LFS **0.01** / **0.002** |
 | `min_opacity` (train) | stock LFS **0.005** |
 | `max_screen_share` / oversize split | stock LFS **0.3** / **0.15** |
 | Exposure | **on** (helper `--no-exposure` to disable) |
-| Preprocess (in helper) | **none** (no MoGe / VDA / DA3) |
+| Preprocess (in helper) | **none** (no MoGe / depth priors) |
 | Crop | Node `crop_aabb.py`: **1% per-axis trim + 0.3 m pad** on init/dense PLY (else COLMAP points3D) → `train_helper.sh --cropbox x0,y0,z0,x1,y1,z1`; `--no-crop` to skip |
 | Occlusion masks | Before train, `black_pixel_masks.py` scans scene images; pure-black pixels → sidecar **`masks/`** (same relative paths as images; **0=ignore, 255=keep**). When any mask exists, helper adds **`--mask-mode ignore`** and **`--no-alpha-as-mask`**. |
 
@@ -55,11 +49,10 @@ Recipe sources: `config/lichtfeld_optimization_params.json` + `scripts/train_hel
 
 **Post-filter** (unchanged product cleanup): opacity prune logit `-3.5` (≈0.03). That is above train `min_opacity`; it still strips floaters after the softer train floor.
 
-## Preprocessing: Splattr only (no MoGe)
+## Preprocessing: Splattr only (no MoGe, no RoMa, no VDA)
 
-1. **`preprocessing.py` (product path with densify)**  
-   **Undistort-only** into `dense/` (camera cull for blur / too-few points; **no** sparse point outlier voxel cleanup). Black occlusion boxes → train **`masks/`** sidecars (not frame drop). Then **`densify_init.run_densify`** (RoMa **turbo**, **0.6** refs) → dense PLY for **`--init`**.  
-   Legacy path when `SPLATTER_DENSIFY=0`: full Splattr preprocess + undistort, no dense init.
+1. **`preprocessing.py` (product path)**  
+   Full Splattr preprocess (camera/point cleanup, optional **short bundle adjustment**) + undistort into `dense/`. Black occlusion boxes → train **`masks/`** sidecars (not frame drop). No RoMa densification; no Video-Depth-Anything.
 
 2. **`train_helper.sh`**  
    **Skips MoGe.** Default train path does not pass `--use-depth-distortion` (\(L_d\) off). NC + flatten from helper flags (no SSI depth prior, no prior normals).
@@ -67,13 +60,13 @@ Recipe sources: `config/lichtfeld_optimization_params.json` + `scripts/train_hel
 ### Notes
 
 - **Keep Splattr camera/point cleanup** (sparse-view cull, blur Laplacian variance &lt; 20). Black rects are **not** whole-frame culls; they are masked at train time.
-- **Do not enable VDA / DA3** on the helper path — `use_vda` remains off for product jobs. **`--init`** is forwarded via `train_helper.sh` when densify produced `dense_init.ply`.
+- **RoMa densify and VDA are not shipped** in the product image or runner (no plugin bake, no torch stack for matching/densify).
 - NC needs `--use-normal-loss` as a schedule gate only; prior normal weight stays **0**.
 
 ## Capability: `/splatter/colmap/v1`
 
-- **Trainer**: `scripts/train_helper.sh` (same recipe as local: `-i` default **30000**, `-r 2`; self-supervised geo in `config/lichtfeld_optimization_params.json`; exports `ply,sog`). Sparsity flag is accepted but ignored on the helper path. Post-filter opacity prune logit `-3.5` (≈0.03).
-- **Pipeline** (`splatter_pipeline.py` `colmap_v1_single_splat`): merged frames + global COLMAP → undistort-only (`undistort_merged_colmap`) → RoMa densify (`turbo`, `0.6` refs) when `SPLATTER_DENSIFY` enabled → same train_helper path as local (masks, cropbox, `--init`) → filter → coordinate transform → **`refined/splatter/splat_rot.splat`**. Runner uploads that file only (no SOG product).
+- **Trainer**: `scripts/train_helper.sh` (same recipe as local: `-i` default **30000**, `-r 2`; self-supervised geo in `config/lichtfeld_optimization_params.json`; exports `ply,sog`; **POPSpa off** by default, **750k target** when sparsity explicitly enabled). Post-filter opacity prune logit `-3.5` (≈0.03).
+- **Pipeline** (`splatter_pipeline.py` `colmap_v1_single_splat`): merged frames + global COLMAP → Splattr preprocess + undistort (BA **on**) → same train_helper path as local (masks, cropbox) → filter → coordinate transform → **`refined/splatter/splat_rot.splat`**. Runner uploads that file only (no SOG product).
 - **Status**: Backward-compatible required output kept.
 - **Runner defaults** (override via env; local/global differ — see table above):
   - `SPLATTER_CONVERT_TO_SOG=false` (colmap default; train SOG on disk is not uploaded)

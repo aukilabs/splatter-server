@@ -1,10 +1,12 @@
-# Fast rebuild of product bits on top of an existing splatter-server image
-# (avoids re-building LichtFeld / vcpkg). Use when only pipeline/helper/config/Rust change.
+# v0.2 fast overlay — rebuild pipeline/helper/config/Rust on an existing base image.
+# Full multi-stage image (LichtFeld + vcpkg) is Dockerfile; rebuild that rarely (e.g. v0.2-dev).
 #
-#   docker build -f Dockerfile.r2-overlay -t splatter-server:r2 -t splatter-server:latest .
+#   docker build -f Dockerfile.r2-overlay -t splatter-server:v0.2-dev .
+#   docker build -f Dockerfile.r2-overlay --build-arg INSTALL_REQUIREMENTS=1 -t splatter-server:v0.2-dev .
 
-ARG BASE_IMAGE=splatter-server:latest
+ARG BASE_IMAGE=splatter-server:v0.2-dev
 ARG SPLATTER_VERSION=0.0.0-local
+ARG INSTALL_REQUIREMENTS=0
 
 FROM --platform=$BUILDPLATFORM rust:1.89-bullseye AS rust-build
 ARG SPLATTER_VERSION
@@ -16,19 +18,25 @@ RUN cargo build --release -p splatter-bin --manifest-path server/rust/Cargo.toml
 FROM ${BASE_IMAGE}
 USER root
 
+ARG INSTALL_REQUIREMENTS
+
 COPY --from=rust-build /app/server/rust/target/release/splatter-bin /app/splatter
 
 COPY splatter_pipeline.py artifact_naming.py local_main.py global_main.py \
      combine_splats.py convert_splat.py filter_splats.py preprocessing.py \
-     partition_splat.py crop_aabb.py black_pixel_masks.py densify_init.py /app/
+     partition_splat.py crop_aabb.py black_pixel_masks.py /app/
 
-COPY scripts/train_helper.sh scripts/run_densify_cli.py /app/scripts/
-COPY config/lichtfeld_optimization_params.json config/lichtfeld_optimization_params_vda.json /app/config/
+COPY scripts/train_helper.sh /app/scripts/
+COPY config/lichtfeld_optimization_params.json /app/config/
 
-RUN chmod +x /app/scripts/train_helper.sh /app/scripts/run_densify_cli.py /app/splatter \
-    && sed -i "s/\r$//" /app/scripts/train_helper.sh /app/scripts/run_densify_cli.py
-# Note: overlay does NOT rebuild LichtFeld or the RoMa densify plugin bake.
-# Densify skipped for now — force off so defaults do not hard-fail without bake.
-ENV SPLATTER_DENSIFY=0
+RUN chmod +x /app/scripts/train_helper.sh /app/splatter \
+    && sed -i "s/\r$//" /app/scripts/train_helper.sh
+
+COPY requirements.txt /app/requirements.overlay.txt
+RUN if [ "$INSTALL_REQUIREMENTS" = "1" ]; then \
+      python -m pip install --no-cache-dir -r /app/requirements.overlay.txt; \
+    fi
+
+ENV SPLATTER_ENABLE_SPARSITY=1
 
 USER 1000:1000

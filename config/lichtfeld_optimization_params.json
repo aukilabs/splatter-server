@@ -9,7 +9,11 @@
   "optimization": {
     "strategy": "mrnf",
     "iterations": 30000,
-    "max_cap": 1000000,
+    "max_cap": 1500000,
+    "enable_sparsity": true,
+    "popspa_target_count": 750000,
+    "sparsify_steps": 5000,
+    "refine_steps": 5000,
     "gut": false,
     "sh_degree": 3,
     "sh_degree_interval": 1000,

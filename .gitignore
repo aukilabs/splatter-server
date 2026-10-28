@@ -63,5 +63,9 @@ _splatter_env.json
 splatter-bin-new
 *.ply
 !config/**
+!third_party/**
+
+# Densify weights cache (lazy download; never bake into git)
+**/romav2.pt
 
 # Other

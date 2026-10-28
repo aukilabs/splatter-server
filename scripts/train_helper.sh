@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # train_helper.sh - splatter train helper (no MoGe preprocess).
 #
-# Locked 2026-10-25 (LFS v0.5.4.2 pin; L_d off by default):
-#   FastGS / mrnf / max_cap=1M / 30k / -r 2 / exposure on
+# Locked 2026-10-28 (LFS v0.5.4.2 pin; L_d off by default):
+#   FastGS / mrnf / max_cap=1M / POPSpa off / 30k / -r 2 / exposure on
 #   L_d off (optional --ld WEIGHT for experiments)
 #   NC=0.1 / flatten=0.1 / normal_start=LFS default (0.08) — see CAPABILITIES.md
 #   No MoGe preprocess, no SSI depth prior, no prior normals
@@ -18,8 +18,11 @@
 #   train_helper.sh --ld 50 <scene> <out>
 #   train_helper.sh --init dense.ply <scene> <out>
 #   train_helper.sh --cropbox x0,y0,z0,x1,y1,z1 <scene> <out>
+#   train_helper.sh --no-sparsity <scene> <out>
 #
 # Optional env:
+#   SPLATTER_ENABLE_SPARSITY   0/off (default) or 1/on — optional POPSpa via LFS CLI
+#   POPSPA_TARGET_COUNT        default 750000
 #   LFS_EXE / LICHTFELD_BIN  path to LichtFeld-Studio binary
 #   LFS_ROOT                 LichtFeld tree (default: /app/LichtFeld-Studio)
 #   LFS_PYTHON               Python for optional results summary
@@ -31,7 +34,7 @@ HELPER_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LFS_ROOT="${LFS_ROOT:-/app/LichtFeld-Studio}"
 
 usage() {
-  echo "usage: $0 [-i iterations] [-r resize] [--init PLY] [--cropbox X0,Y0,Z0,X1,Y1,Z1] [--no-exposure] [--no-crop] [--ld WEIGHT] <scene> <out>" >&2
+  echo "usage: $0 [-i iterations] [-r resize] [--init PLY] [--cropbox X0,Y0,Z0,X1,Y1,Z1] [--no-exposure] [--no-crop] [--ld WEIGHT] [--enable-sparsity|--no-sparsity] <scene> <out>" >&2
   exit 2
 }
 
@@ -42,6 +45,8 @@ USE_CROP=1
 CROPBOX=""
 LD_WEIGHT="0"
 INIT_PLY=""
+ENABLE_SPARSITY="${SPLATTER_ENABLE_SPARSITY:-0}"
+POPSPA_TARGET_COUNT="${POPSPA_TARGET_COUNT:-750000}"
 SCENE=""
 OUT=""
 
@@ -83,6 +88,14 @@ while [[ $# -gt 0 ]]; do
       [[ $# -ge 2 ]] || usage
       INIT_PLY="$2"
       shift 2
+      ;;
+    --enable-sparsity)
+      ENABLE_SPARSITY=1
+      shift
+      ;;
+    --no-sparsity)
+      ENABLE_SPARSITY=0
+      shift
       ;;
     -h|--help)
       usage
@@ -221,6 +234,20 @@ echo "    densify=stock LFS defaults (opacity_lr=0.025 reg=0.01 screen_share=0.3
 echo "    config=${CONFIG}"
 echo "    export=ply,sog"
 
+sparsity_enabled() {
+  case "${ENABLE_SPARSITY}" in
+    1|true|TRUE|yes|YES|on|ON) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+if sparsity_enabled; then
+  SPARSITY_LABEL="POPSpa target=${POPSPA_TARGET_COUNT}"
+else
+  SPARSITY_LABEL=off
+fi
+echo "    sparsity=${SPARSITY_LABEL}"
+
 TRAIN_CMD=(
   "${EXE}"
   --headless
@@ -232,6 +259,10 @@ TRAIN_CMD=(
   --max-cap 1000000
   -i "${ITERATIONS}"
   -r "${RESIZE_FACTOR}"
+  # Pin export stem to requested train iters. POPSpa adds sparsify+refine steps
+  # (default +10k → total 40k); without this LFS names files splat_<total>.ply
+  # and post-train filter looks for splat_${ITERATIONS}.ply.
+  --output-name "splat_${ITERATIONS}"
   --eval
   --eval-steps "${ITERATIONS}"
   --export "ply,sog"
@@ -271,6 +302,10 @@ fi
 
 if [[ "${USE_SIDECAR_MASKS}" -eq 1 ]]; then
   TRAIN_CMD+=(--mask-mode ignore --no-alpha-as-mask)
+fi
+
+if sparsity_enabled; then
+  TRAIN_CMD+=(--enable-sparsity --popspa-target-count "${POPSPA_TARGET_COUNT}")
 fi
 
 "${TRAIN_CMD[@]}"

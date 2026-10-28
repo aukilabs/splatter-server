@@ -1,56 +1,25 @@
 from pathlib import Path
-import pycolmap
 import preprocessing
 import filter_splats
 import convert_splat
 import argparse
 import time
-import sys
-import shutil
 import os
 import re
 import subprocess
-import open3d as o3d
-from preprocessing import run_bundle_adjustment, set_colmap_points_from_pointcloud, cleanup_rec_cameras
 import crop_aabb
 import black_pixel_masks
-import densify_init
 
 LICHTFELD_BIN = os.environ.get("LICHTFELD_BIN", "/app/LichtFeld-Studio/build/LichtFeld-Studio")
 LICHTFELD_TRAIN_HELPER = os.environ.get(
     "LICHTFELD_TRAIN_HELPER", "/app/scripts/train_helper.sh"
 )
 LICHTFELD_CONFIG = os.environ.get("LICHTFELD_CONFIG", "config/lichtfeld_optimization_params.json")
-LICHTFELD_CONFIG_VDA = os.environ.get("LICHTFELD_CONFIG_VDA", "config/lichtfeld_optimization_params_vda.json")
-VDA_REPO = os.environ.get("VDA_REPO", "/app/Video-Depth-Anything")
 
-def run_vda_depth(colmap_dir: Path, image_root: Path, output_dir: Path, voxel_size: float = 0.1) -> Path:
-    """Run colmap_vda_depth.py to generate initial splat from depth estimation."""
-    script_path = Path(__file__).parent / "colmap_vda_depth.py"
-    cmd = [
-        sys.executable, str(script_path),
-        str(colmap_dir),
-        "--image_root", str(image_root),
-        "--output_dir", str(output_dir),
-        "--vda_repo", VDA_REPO,
-        "--encoder", "vitl",
-        "--metric",
-        "--max_depth", "2.5",
-        "--stride", "10",
-        "--voxel_size", str(voxel_size),
-        "--subtractive_scanning",
-        "--subtractive_value", "-0.5",
-        #"--fit_shift",
-        "--save_splat",
-        "--save_voxel_mesh",
-        #"--texture_mesh",
-        "--reuse_vda",
-        "--fp32",
-    ]
 
-    print(f"[VDA] Running: {' '.join(cmd)}")
-    subprocess.run(cmd, check=True)
-    return output_dir / "grid_splat.ply"
+def _default_enable_sparsity() -> bool:
+    v = os.environ.get("SPLATTER_ENABLE_SPARSITY", "0").strip().lower()
+    return v not in ("0", "false", "no", "off")
 
 
 _TRAINING_RE = re.compile(
@@ -143,7 +112,7 @@ def _train_splat_legacy(
         "--ppisp",
         "-i", str(iterations),
         "--images", os.path.abspath(str(images_dir)),
-        "--config", LICHTFELD_CONFIG_VDA if init_ply is not None else LICHTFELD_CONFIG,
+        "--config", LICHTFELD_CONFIG,
         "--headless",
     ]
 
@@ -160,21 +129,17 @@ def _train_splat_legacy(
 
 def train_splat(colmap_dir: Path, output_dir: Path, images_dir: Path = None,
                 iterations: int = 30000,
-                enable_sparsity: bool = False, sparsify_steps: int = 15000,
+                enable_sparsity: bool | None = None, sparsify_steps: int = 15000,
                 init_ply: Path = None, use_train_helper: bool = True,
                 use_crop: bool = True):
     if not images_dir:
         images_dir = colmap_dir / "images"
+    if enable_sparsity is None:
+        enable_sparsity = _default_enable_sparsity()
 
     if use_train_helper:
-        # train_helper path: sparsity unsupported. Recipe is LFS v0.5.4.2
-        # (L_d off), NC=0.1, flatten=0.1, normal_start=LFS default, exposure on.
-        if enable_sparsity:
-            print(
-                "[train_splat] enable_sparsity ignored on train_helper path",
-                flush=True,
-            )
-
+        # train_helper path: LFS v0.5.4.2 recipe (L_d off), NC=0.1, flatten=0.1,
+        # max_cap 1M; POPSpa only when enable_sparsity.
         scene_dir = _prepare_helper_scene(colmap_dir, images_dir)
         black_pixel_masks.ensure_black_pixel_masks(scene_dir / "images", scene_dir=scene_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -187,6 +152,10 @@ def train_splat(colmap_dir: Path, output_dir: Path, images_dir: Path = None,
         ]
         if init_ply is not None:
             cmd.extend(["--init", str(init_ply)])
+        if enable_sparsity:
+            cmd.append("--enable-sparsity")
+        else:
+            cmd.append("--no-sparsity")
         if not use_crop:
             cmd.append("--no-crop")
         else:
@@ -215,13 +184,16 @@ def train_splat(colmap_dir: Path, output_dir: Path, images_dir: Path = None,
     )
 
 def scan_main(job_root: Path, scan_id: str, iterations: int = 30000,
-              enable_sparsity: bool = False, sparsify_steps: int = 15000,
-              reuse_trained: bool = False, use_vda: bool = False,
+              enable_sparsity: bool | None = None, sparsify_steps: int = 15000,
+              reuse_trained: bool = False,
               do_convert_splat: bool = False, do_convert_sog: bool = False,
-              bundle_adjust: bool = False) -> None:
+              bundle_adjust: bool = True) -> None:
+    if enable_sparsity is None:
+        enable_sparsity = _default_enable_sparsity()
     start_time = time.time()
 
-    # train_helper exports splat_{iterations}.ply (+ .sog). Filter/combine still use PLY.
+    # train_helper passes --output-name splat_{iterations} so POPSpa extra steps
+    # do not rename the export (LFS default would be splat_<total_iters>).
     splat_filename = f"splat_{iterations}"
     splat_dir = job_root / "refined" / "local" / scan_id / "splat"
     images_dir = job_root / "refined" / "local" / scan_id / "dense" / "images"
@@ -229,57 +201,10 @@ def scan_main(job_root: Path, scan_id: str, iterations: int = 30000,
     if reuse_trained and (splat_dir / f"{splat_filename}.ply").exists():
         print("Splat reuse enabled, skip ahead to filtering")
     else:
-        if not use_vda:
-            init_ply = None
-            if densify_init.densify_enabled():
-                shutil.rmtree(splat_dir, ignore_errors=True)
-                splat_dir.mkdir(parents=True, exist_ok=True)
-                preprocessing.undistort_local_scan(job_root, scan_id)
-                dense_dir = job_root / "refined" / "local" / scan_id / "dense"
-                init_ply = densify_init.run_densify(dense_dir)
-            else:
-                # Legacy Splattr preprocess + undistort (no RoMa dense init).
-                preprocessing.main(job_root, scan_id, bundle_adjust=bundle_adjust)
-        else:
-            # Don't run the full preprocessing since the colmap 3D point
-            # outlier filtering clears 2D/3D point relations.
-            # These are needed by the VDA densification to scale depth maps to fit point cloud.
+        preprocessing.main(job_root, scan_id, bundle_adjust=bundle_adjust)
 
-            sfm_dir = job_root / "refined" / "local" / scan_id / "sfm"
-            frames_dir = job_root / "datasets" / scan_id / "Frames"
-            
-            vda_output_dir = job_root / "refined" / "local" / scan_id / "vda_depth"
-            init_ply = run_vda_depth(sfm_dir, frames_dir, vda_output_dir, voxel_size=0.1)
-            #init_ply = None
-
-            processed_dir = job_root / "refined" / "local" / scan_id / "processed"
-            processed_dir.mkdir(parents=True, exist_ok=True)
-
-            rec = pycolmap.Reconstruction()
-            rec.read(str(sfm_dir))
-            rec = cleanup_rec_cameras(rec, frames_dir=frames_dir)
-            if bundle_adjust:
-                rec = run_bundle_adjustment(rec)
-            
-            vda_pointcloud = vda_output_dir / "grid_voxels.ply"
-            pcd = o3d.io.read_point_cloud(vda_pointcloud)
-            print(f"[VDA] override colmap with {len(pcd.points)} points from VDA voxel grid")
-            set_colmap_points_from_pointcloud(rec, pcd)
-            rec.write(processed_dir)
-            print(f"[VDA] Using init splat: {init_ply}")
-
-            
-            dense_dir = job_root / "refined" / "local" / scan_id / "dense"
-            shutil.rmtree(dense_dir, ignore_errors=True)
-            dense_dir.mkdir(parents=True, exist_ok=True)
-            pycolmap.undistort_images(
-                output_path=str(dense_dir),
-                input_path=str(processed_dir),
-                image_path=str(frames_dir)
-            )
-        
         train_splat(colmap_dir, splat_dir, images_dir, iterations=iterations,
-                    enable_sparsity=enable_sparsity, sparsify_steps=sparsify_steps, init_ply=init_ply)
+                    enable_sparsity=enable_sparsity, sparsify_steps=sparsify_steps)
 
     filtered_ply = splat_dir / f"{splat_filename}.filtered.ply"
     filter_args = argparse.Namespace(
@@ -317,14 +242,14 @@ def scan_main(job_root: Path, scan_id: str, iterations: int = 30000,
 def main(job_root: Path,
          scan_ids: list[str],
          iterations: int = 30000,
-         enable_sparsity: bool = False,
+         enable_sparsity: bool | None = None,
          sparsify_steps: int = 15000,
          reuse_trained: bool = False,
          do_convert_splat: bool = False,
          do_convert_sog: bool = False,
-         use_vda: bool = False
 ) -> None:
-    print(f"Use vda: {use_vda}")
+    if enable_sparsity is None:
+        enable_sparsity = _default_enable_sparsity()
     for scan_id in scan_ids:
         scan_main(
             job_root,
@@ -335,7 +260,6 @@ def main(job_root: Path,
             reuse_trained=reuse_trained,
             do_convert_splat=do_convert_splat,
             do_convert_sog=do_convert_sog,
-            use_vda=use_vda,
         )
 
 if __name__ == "__main__":
@@ -345,14 +269,23 @@ if __name__ == "__main__":
     parser.add_argument("--all-scan-ids", action="store_true", default=False)
     parser.add_argument("--iterations", type=int, default=30000)
     parser.add_argument("--reuse-trained", action="store_true", default=False)
-    parser.add_argument("--enable-sparsity", action="store_true", default=False)
+    parser.add_argument(
+        "--enable-sparsity",
+        action="store_true",
+        default=None,
+        help="Enable POPSpa sparsity (default: SPLATTER_ENABLE_SPARSITY or off)",
+    )
+    parser.add_argument(
+        "--no-sparsity",
+        action="store_true",
+        default=False,
+        help="Disable POPSpa sparsity",
+    )
     parser.add_argument("--sparsify-steps", type=int, default=15000)
     parser.add_argument("--convert-splat", action="store_true", default=False,
                         help="Also output as .splat format")
     parser.add_argument("--convert-sog", action="store_true", default=False,
                         help="Also output as .sog format")
-    parser.add_argument("--vda", action="store_true", default=False,
-                        help="Use Video-Depth-Anything to generate initial splat for training")
 
     args = parser.parse_args()
     print(f"args: {args}")
@@ -364,12 +297,18 @@ if __name__ == "__main__":
         scan_ids = [f.name for f in (args.job_root / "datasets").iterdir() if f.is_dir()]
     else:
         scan_ids = [args.scan_id]
+    if args.no_sparsity:
+        enable_sparsity = False
+    elif args.enable_sparsity:
+        enable_sparsity = True
+    else:
+        enable_sparsity = _default_enable_sparsity()
     main(job_root=args.job_root,
          scan_ids=scan_ids,
          iterations=args.iterations,
-         enable_sparsity=args.enable_sparsity,
+         enable_sparsity=enable_sparsity,
          sparsify_steps=args.sparsify_steps,
          reuse_trained=args.reuse_trained,
          do_convert_splat=args.convert_splat,
-         do_convert_sog=args.convert_sog,
-         use_vda=args.vda)
+         do_convert_sog=args.convert_sog)
+

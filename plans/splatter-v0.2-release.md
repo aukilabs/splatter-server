@@ -2,9 +2,9 @@
 
 Status: active  
 Tier: feature  
-Stage: 7-implement  
+Stage: 4-design  
 Skips: _(none)_  
-Last updated: 2026-10-27
+Last updated: 2026-10-28 (bounce: POPSpa out; max_cap 1M)
 
 Living document — update in place when later work changes earlier conclusions.  
 **§1 Intent (feature) and §4 System design stay distinct — never merge.**
@@ -13,165 +13,146 @@ Living document — update in place when later work changes earlier conclusions.
 
 ## 1. Intent
 
-- **Customer / internal need:** Domain operators need a splatter node that can finish **local+global** on domains **larger than DMT’s ~10-scan colmap cap**, without the v0.1 time/RAM/VRAM blowups, with **RTX 50xx** support, and without the quality/perf hit from large floaters / overdraw seen in earlier geo experiments.
-- **Framing:** Ship **splatter node v0.2** that (1) runs distributed **`/splatter/local/v1` → `/splatter/global/v1`**, (2) keeps backward-compatible **`/splatter/colmap/v1`** for stock DMT ≤10 scans, (3) trains on **official stable LichtFeld** (no custom \(L_d\) fork), (4) densifies with the **RoMa densification plugin** instead of Splattr preprocess, (5) ships **SOG-only** artifacts for faster upload/IO.
-- **Why now:** Local+global plumbing and recipes already exist in-tree but are not a clean release; custom \(L_d\) / MoGe paths add cost without clear win; densify+masks+SOG+10 m tiles are the product shape operators want.
+- **Customer / internal need:** Domain operators need a splatter node that can finish **local+global** on domains **larger than DMT’s ~10-scan colmap cap**, without the v0.1 time/RAM/VRAM blowups, with **RTX 50xx** support, and without the quality/perf hit from large floaters / overdraw.
+- **Framing:** Ship **splatter node v0.2** that (1) runs distributed **`/splatter/local/v1` → `/splatter/global/v1`**, (2) keeps backward-compatible **`/splatter/colmap/v1`** for stock DMT ≤10 scans, (3) trains on **official stable LichtFeld**, (4) uses **Splattr preprocess + short BA** (no RoMa densify), (5) trains under **max_cap 1M** with **POPSpa off**, (6) ships **SOG-only** local/global artifacts.
+- **Why now:** Densify-on grocery compare was no clear win (removed). POPSpa 750k / 1.5M cap grocery compare looked **worse** than sparse baseline (human 2026-10-28) — drop POPSpa and return to **1M** cap.
 - **Success look like:**
-  1. Published image tagged **v0.2** (or agreed RC) registers all three caps; colmap path still produces `refined_splat_*` for DMT.
-  2. Grocery-scale (and ideally grocery-large / >10 scans) local→global completes without OOM; wall time and peak VRAM acceptable vs v0.1 colmap on small domains.
-  3. Visual quality: fewer large floaters / less overdraw than the degraded geo trials; human “good enough to ship” on at least one multi-scan domain.
-  4. Builds and runs on **RTX 50xx** (smoke) in addition to existing Ada/Ampere nodes.
+  1. Published image tagged **v0.2** registers all three caps; colmap still produces `refined_splat_*` for DMT.
+  2. Grocery-scale local→global completes; wall time/VRAM acceptable.
+  3. Visual quality competitive with S8 sparse baseline under 1M / no POPSpa; human ship gate.
+  4. Builds and runs on **RTX 50xx**.
 
-**§1 locked** (2026-10-25).
+**§1 bounced** (2026-10-28 #2) — POPSpa no longer a success criterion; cap back to 1M.
 
 ## 2. Alternatives
 
-- Stay on v0.1 colmap-only + DMT 10-scan cap — **rejected** (doesn’t scale; no 50xx path).
-- Ship custom LichtFeld \(L_d\) fork — **rejected** (not official stable; quality/PSNR regressions; Docker must pin official tags only).
-- Keep Splattr preprocess + drop densify — **rejected** (human prefers densify turbo results from UI).
-- Replace `points3D` with dense cloud — **rejected** in favor of **`--init` dense PLY** (cleaner).
-- **Decision:** proceed with v0.2 as framed in §1.
+- Stay on v0.1 colmap-only + DMT 10-scan cap — **rejected**.
+- Ship custom LichtFeld \(L_d\) fork — **rejected**.
+- Keep RoMa densify in product — **rejected** (grocery compare no clear win).
+- POPSpa 750k / max_cap 1.5M — **rejected** (2026-10-28: human visual worse vs S8 sparse).
+- **Decision:** v0.2 with Splattr+BA, no densify, **max_cap 1M**, **POPSpa off**, SOG local/global.
 
 ## 3. Priority
 
-- **Decision:** top-of-queue for splatter-server release work (blocks domain-setup scale-out).
-- Opportunity cost: pauses further recipe ablations (garden \(L_d\) sweeps, etc.) until this ships or parks.
+- **Decision:** top-of-queue for splatter-server release work.
 
 ## 4. System design
 
-**Decision:** design change required (trainer recipe, densify+masks staging, crop CLI, SOG-only contracts, LFS pin, Docker).
+**Decision:** design change required (bounce 2026-10-28 #2).
 
 ### Products / codebases
 
 | Area | Role |
 |---|---|
-| `splatter-server` | Caps, pipeline, Docker, train_helper, crop/mask staging, uploads |
-| LichtFeld Studio **v0.5.4.2** | Official pin (no custom \(L_d\)) |
-| Densification plugin (`shadygm/Lichtfeld-Densification-Plugin`) | RoMa dense init CLI; bake into image / invoke from node |
-| DMT / DMS (out of repo) | Already can call local→global; colmap remains ≤10 path |
+| `splatter-server` | Caps, pipeline, Docker, train_helper, crop/mask, uploads |
+| LichtFeld Studio **v0.5.4.2** | Official pin |
+| DMT / DMS (out of repo) | local→global; colmap ≤10 |
+
+**Removed from product:** RoMa densify plugin (`Lichtfeld-Densification-Plugin`), `densify_init`, VDA / MoGe / \(L_d\).  
+**Default off (not product recipe):** POPSpa sparsity (`--enable-sparsity` remains optional CLI/env for experiments).
 
 ### Locked recipe (train)
 
 | Knob | Value |
 |---|---|
 | LFS pin | **v0.5.4.2** |
-| Strategy / cap | **mrnf** / **1M** |
+| Strategy / max_cap | **mrnf** / **1M** |
 | Iters / resize | **30000** / **-r 2** |
 | Exposure | **on** |
 | MoGe / SSI / \(L_d\) / prior normals | **off** |
 | NC / flatten | **0.1** / **0.1** |
-| `normal_start_fraction` | **LFS default (0.08)** — do not override |
-| Densify LRs/regs | **stock LFS** |
-| Dense init | Plugin **`turbo`**, **`num_refs=0.6`** → PLY → train **`--init`** |
-| Crop | Node Python: **1% trim + 0.3 m pad** AABB → **`--cropbox x0,y0,z0,x1,y1,z1`** (no in-LFS auto_fit script) |
-| Occlusion | Pure-black pixels → sidecar **`masks/`** (0=ignore, 255=keep); train **`--mask-mode ignore`** + **`--no-alpha-as-mask`**; do **not** drop whole frames for black rects |
-| Export / upload | **SOG only** (local + global partitions); no product PLY/`.splat` on local/global |
-| Global tiles | **10 m**; coarse/fine LOD split unchanged (sigmoid ≥0.6, min size 0.01) |
+| `normal_start_fraction` | **LFS default (0.08)** |
+| Train densify LRs/regs / max_screen_share | **stock LFS** |
+| Dense init (`--init`) | **off** (no RoMa) |
+| Preprocess | **Splattr** camera + point cleanup → undistort |
+| Bundle adjust | **on** (≤20 iters; focal+radial; poses refineable) |
+| POPSpa | **off** by default (`SPLATTER_ENABLE_SPARSITY=0`); optional CLI only |
+| Crop | **1% trim + 0.3 m pad** → `--cropbox` |
+| Occlusion | black pixels → `masks/` (0=ignore, 255=keep); `--mask-mode ignore` |
+| Export / upload | **SOG only** local+global; colmap stays `.splat` |
+| Global tiles | **10 m** |
 
 ### Pipeline (local → global)
 
-1. Stage recording + refined scan (images + sparse as today; **no Splattr preprocess**).
-2. Generate black-pixel **masks/** sidecars where needed.
-3. Run densify CLI (`turbo`, `num_refs=0.6`, masks if supported).
-4. Compute crop AABB → pass `--cropbox` into train.
-5. `train_helper`: LFS headless train with recipe + `--init dense.ply` + masks + cropbox → SOG.
-6. Local post-filter (opacity logit -3.5, size/view gates — retain unless bounce) → upload **`local_splat_sog_*` only**.
-7. Global: combine (Sim3) → coarse/fine → partition **10 m** → upload **`splat_partition_{coarse|fine}_*`.sog** only.
+1. Stage recording + refined scan.
+2. Splattr preprocess (camera cull + sparse point cleanup) + **BA** → undistort `dense/`.
+3. Black-pixel masks; crop AABB → `--cropbox`.
+4. `train_helper`: recipe, **max_cap 1M**, **`--no-sparsity`**, masks, cropbox → SOG.
+5. Local post-filter → upload `local_splat_sog_*`.
+6. Global: combine → coarse/fine → 10 m SOG partitions.
 
-### Pipeline (colmap / v0.1 back-compat)
+### Pipeline (colmap)
 
-Same densify + train recipe on merged multi-scan colmap job. **Locked 2026-10-25:** colmap keeps **`.splat` → `refined_splat_*`** for DMT; local/global stay **SOG-only**.
+Same train recipe (no densify); upload **`.splat` / `refined_splat_*`**.
 
 ### Boundaries
 
-- **In scope:** recipe/helper/Docker pin; densify integrate; crop Python→CLI; masks; SOG-only local/global; 10 m; CAPABILITIES; RTX 50xx smoke.
-- **Out of scope:** stock DMT UI changes; custom LFS fork; MoGe; LEP CI gate.
+- **In scope:** default recipe flip (POPSpa off, max_cap 1M); CAPABILITIES/helper/docs; overlay rebuild + grocery smoke + visual.
+- **Out of scope:** DMT UI; custom LFS fork; MoGe; LEP CI; bringing densify back; deleting optional sparsity CLI flags.
 
 ### Risks
 
-- Densify wall time/VRAM on 40+ scan domains even at turbo+0.6 refs.
-- `--init` + dense PLY semantics vs sparse COLMAP (must re-enable helper `--init`).
-- Mask polarity / resize alignment with `-r 2`.
-- RTX 50xx: pin alone may not fix arch — may need CUDA/image bump (escalate if smoke fails).
-- Colmap `.splat` path must keep filter→rotate→convert contract while local/global drop PLY uploads.
+- 1M cap alone may still haze vs densify experiments — accept unless human reopens densify.
+- BA may nudge poses; keep iters low (already ≤20).
 
-**§4 locked** (2026-10-25).
+**§4 bounced** (2026-10-28 #2).
 
 ## 5. Verification design
 
-**Depth:** wiring + one real local→global + colmap smoke + 50xx smoke. Human visual gate.
+**Depth:** static wiring + one local→global grocery smoke + human visual.
 
 ### Acceptance
 
-1. Image builds with LFS **v0.5.4.2** (no `--use-depth-distortion` required).
-2. Local job: densify turbo runs; train gets `--init` + `--cropbox` + `--mask-mode ignore` when masks exist; uploads **SOG only**.
-3. Global job: 10 m coarse/fine SOG partitions; no PLY product upload.
-4. Colmap/v1: still completes; DMT-compatible artifact (per §4 colmap decision).
-5. Human visual: multi-scan domain “ship quality”; floaters/overdraw not worse than v0.1 baseline.
-6. RTX 50xx: node registers and finishes a small smoke job.
+1. No densify/VDA on product path; Dockerfile does not bake plugin.
+2. Local: Splattr+BA; train argv has `--max-cap 1000000` and **no** `--enable-sparsity` / no `--popspa-target-count` by default.
+3. Global: 10 m SOG partitions.
+4. Colmap/v1 still produces `refined_splat_*`.
+5. Human visual on grocery-small 1M / no-POPSpa.
 
 ### Checks
 
 | ID | Check |
 |----|--------|
-| V1 | Helper argv: no \(L_d\); NC/flatten 0.1; no start override; `--init` present when densify ran |
-| V2 | Crop passed as `--cropbox` (not python-script auto_fit) |
-| V3 | Masks under `masks/`; `--mask-mode ignore` |
-| V4 | Local/global product uploads SOG-only; partition size 10 |
-| V5 | Docker pin = v0.5.4.2 |
+| V1 | Helper: no \(L_d\); NC/flatten 0.1; no `--init`; **sparsity default off**; **max_cap 1M** |
+| V2 | Crop `--cropbox` |
+| V3 | Masks + `--mask-mode ignore` |
+| V4 | SOG-only local/global; 10 m |
+| V5 | Docker pin v0.5.4.2; no densify plugin bake |
 | V6 | Human E2E visual |
-| V7 | 50xx smoke |
+| V8 | BA runs (bundle_adjust true on local path) |
 
-### Out of scope for verify
+**§5 bounced** (2026-10-28 #2).
 
-- Full grocery-large SLA; multi-scene LEP CI; public fleet rollout.
-
-**§5 locked** (2026-10-25).
-
-## 6. Work breakdown (AI-oriented)
+## 6. Work breakdown
 
 | Id | Slice | Notes |
 |----|-------|-------|
-| S1 | Pin LFS v0.5.4.2; strip \(L_d\)/MoGe bake leftovers from Dockerfile + helper | V5 |
-| S2 | Recipe: NC/flatten 0.1; start default; exposure on; stock densify; enable `--init` | V1 |
-| S3 | Python crop AABB (1%+0.3 m) → `--cropbox`; remove auto_fit python-script path | V2 |
-| S4 | Black-pixel → `masks/` + `--mask-mode ignore` (+ densify masks if easy) | V3 |
-| S5 | Integrate densify plugin (turbo, num_refs=0.6) into local+colmap before train | V1 |
-| S6 | SOG-only local uploads; global SOG-only; partition default **10 m**; CAPABILITIES | V4 |
-| S7 | Colmap keeps `.splat`/`refined_splat_*`; densify+recipe shared | V4/colmap |
-| S8 | Human E2E local→global visual | V6 |
-| S9 | RTX 50xx smoke | V7 |
+| S1–S12 | _(done — historical)_ | densify era closed |
+| S13–S15 | _(done / superseded)_ | densify removal + BA kept; POPSpa/1.5M recipe **superseded** by bounce #2 |
+| **S16** | Recipe defaults: **max_cap 1M**; **POPSpa off** (`SPLATTER_ENABLE_SPARSITY` default 0 / `--no-sparsity`); CAPABILITIES + helper comments; keep optional `--enable-sparsity` for experiments; keep `--output-name` fix | V1 |
+| **S17** | Overlay rebuild + grocery-small smoke + compare/visual (no POPSpa) | V6 |
 
-**Stop/escalate:** densify OOM; 50xx needs new CUDA base; DMT rejects SOG on colmap → bounce §4 colmap format.
+**Stop/escalate:** visual still worse than S8 after S17.
 
-**§6 locked** (2026-10-25).  
-**Approvals:** **mass-approve S1–S9** + **Auto mode: on** (2026-10-25).
+**§6 bounced** (2026-10-28 #2).  
+**Approvals:** Mass-approve S16–S17 (human 2026-10-28: proceed then commit + draft PR).
 
 ## 7. Implementation notes
 
-- **Auto mode: on** (2026-10-25) — mass-approve remaining S1–S9; skip per-slice AskQuestion until done/parked/revoked.
-- Chat decisions 2026-10-25: official LFS only; no \(L_d\); densify `--init`; masks not frame drop; SOG-only; 10 m; crop via `--cropbox`.
-- Mask polarity locked: **0=ignore, 255=keep**.
-- Colmap artifact: **`.splat` / `refined_splat_*`** (locked 2026-10-25).
-- Praxis: one implementer → review → verify per slice; subagents on **composer-2.5** / `composer-2.5-fast`.
-- **Auto (S8 build):** densify bake **skipped for now** (`SPLATTER_DENSIFY=0`); full `Dockerfile` image `splatter-server:v0.2-dev`.
-- **S8 fail fix (2026-10-27):** `local_main` bool params shadowed `convert_splat` module → `AttributeError` on SOG convert. Renamed to `do_convert_splat` / `do_convert_sog`. Resubmit job `72501615-07ad-46e7-a6ae-a8866e4eff6c`.
-- **S8 global fail (2026-10-27):** v0.4.3 `refined_manifest` has `portal_alignment_metrics` but no `scanAlignmentTransforms`. Locals OK; global combine hard-failed. Grocery-small refined SFMs already share a global frame (scan means meters apart) → `combine_splats` identity Sim3 fallback. Global-only retry job `5313a2ca-d31f-4243-be78-8d6acd56552a` completed (20 SOG partitions).
-- **S8 human visual (2026-10-27):** **pass** — mp4 looks good; splat decent though sparse; looks correct. Densify still off (`SPLATTER_DENSIFY=0`) so sparsity expected.
-- Residual: recon should restore writing `scanAlignmentTransforms` when non-identity; identity fallback is a splat-side guard.
+- **Auto mode: on** — mass-approve S16–S17 (2026-10-28).
+- **Bounce #1 (2026-10-28):** densify off; BA on; max_cap 1.5M; POPSpa 750k.
+- **Bounce #2 (2026-10-28):** human visual on `splatter-v02-popspa` — POPSpa made it worse → **POPSpa off**, **max_cap 1M**. Keep densify out; keep BA.
+- Prior compare pages kept as historical evidence (`splatter-v02-densify`, `splatter-v02-popspa`, `splatter-v02-s8`).
+- Praxis: implementer → review → verify per slice; subagents **composer-2.5** / `composer-2.5-fast`.
+- **S15 smoke fail fix retained:** `train_helper` `--output-name splat_${ITERATIONS}` (harmless without POPSpa).
 
 ## 8. Verification record
 
-- **S1** (2026-10-25): review approve; verify **pass** (V5 pin v0.5.4.2; L_d off on helper+local_main; MoGe bake removed).
-- **S2** (2026-10-25): review approve; verify **pass** (V1 NC/flatten 0.1; no start override; JSON L_d off; `--init` chain).
-- **S3** (2026-10-25): review approve; verify **pass** (V2 `crop_aabb` 1%+0.3 m → `--cropbox`; auto_fit removed).
-- **S4** (2026-10-25): review approve; verify **pass** (V3 black→`masks/` + `--mask-mode ignore`; no whole-frame black drop).
-- **S5** (2026-10-25): review approve (after bake revise); verify **pass** static (densify turbo/0.6 → `--init`; Dockerfile clone+venv; unit tests; docker build not run).
-- **S6** (2026-10-25): review approve; verify **pass** (V4 local/global SOG-only; partition default 10 m; CAPABILITIES; contract tests).
-- **S7** (2026-10-25): review approve; verify **pass** (colmap `refined_splat_*` `.splat` kept; CAPABILITIES split; contract tests; S6 SOG tests still pass).
-- **S8** (2026-10-27): human V6 **pass** — mp4 good; splat sparse but correct (densify off).
+- S1–S12: see prior entries (densify era).
+- S13–S15: densify removed + BA on; POPSpa smoke completed then **rejected by human visual**.
+- S16–S17: _(pending)_
 
 ## Gate (stage 11)
 
-- **Decision:** _(pending)_  
-- **Notes:**
+- **Decision:** _(pending — after S17)_  
+- **Notes:** release recipe = Splattr+BA, no densify, no POPSpa, max_cap 1M.
