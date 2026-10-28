@@ -37,6 +37,6 @@ RUN if [ "$INSTALL_REQUIREMENTS" = "1" ]; then \
       python -m pip install --no-cache-dir -r /app/requirements.overlay.txt; \
     fi
 
-ENV SPLATTER_ENABLE_SPARSITY=1
+ENV SPLATTER_ENABLE_SPARSITY=0
 
 USER 1000:1000

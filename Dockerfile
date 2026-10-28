@@ -170,7 +170,7 @@ ENV LICHTFELD_TRAIN_HELPER=/app/scripts/train_helper.sh
 ENV LFS_ROOT=/app/LichtFeld-Studio
 ENV LICHTFELD_CONFIG=/app/config/lichtfeld_optimization_params.json
 ENV SPLATTER_ENABLE_LICHTFELD_COLMAP=true
-ENV SPLATTER_ENABLE_SPARSITY=1
+ENV SPLATTER_ENABLE_SPARSITY=0
 ENV SPLATTER_USE_LEGACY_COLMAP_RUN_PY=false
 
 # Non-root runtime: only chown directories the process actually writes to
