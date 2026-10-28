@@ -2,9 +2,9 @@
 
 Status: active  
 Tier: feature  
-Stage: 4-design  
+Stage: 7-implement  
 Skips: _(none)_  
-Last updated: 2026-10-28 (bounce: POPSpa out; max_cap 1M)
+Last updated: 2026-10-28 (S16 done; draft PR #36; S17 pending)
 
 Living document — update in place when later work changes earlier conclusions.  
 **§1 Intent (feature) and §4 System design stay distinct — never merge.**
