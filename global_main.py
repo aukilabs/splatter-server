@@ -126,7 +126,6 @@ def convert_aligned_scans(job_root: Path, to_splat: bool = True, to_sog: bool = 
 
 def main(job_root: Path, scan_ids: list[str],
          base_filename: str = "splat_30000",
-         sparsify_steps: int = 0,
          use_filtered: bool = True,
          do_partition: bool = True, partition_size: float = 10.0,
          do_convert_splat: bool = True, do_convert_sog: bool = False) -> dict:
@@ -174,7 +173,6 @@ if __name__ == "__main__":
     parser.add_argument("--scan-ids", type=str, nargs="+", default=None,
                         help="Scan IDs to process (default: all in datasets/)")
     parser.add_argument("--base-filename", type=str, default="splat_30000")
-    parser.add_argument("--sparsify-steps", type=int, default=0)
     parser.add_argument("--use-filtered", action="store_true", default=True)
     parser.add_argument("--no-partition", action="store_true", default=False)
     parser.add_argument("--partition-size", type=float, default=10.0)
@@ -193,7 +191,6 @@ if __name__ == "__main__":
         job_root=args.job_root,
         scan_ids=scan_ids,
         base_filename=args.base_filename,
-        sparsify_steps=args.sparsify_steps,
         use_filtered=args.use_filtered,
         do_partition=not args.no_partition,
         partition_size=args.partition_size,

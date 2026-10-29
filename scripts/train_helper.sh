@@ -1,14 +1,10 @@
 #!/usr/bin/env bash
 # train_helper.sh - splatter train helper (no MoGe preprocess).
 #
-# Locked 2026-10-28 (LFS v0.5.4.2 pin; L_d off by default):
-#   FastGS / mrnf / max_cap=1M / POPSpa off / 30k / -r 2 / exposure on
-#   L_d off (optional --ld WEIGHT for experiments)
-#   NC=0.1 / flatten=0.1 / normal_start=LFS default (0.08) — see CAPABILITIES.md
-#   No MoGe preprocess, no SSI depth prior, no prior normals
-#   Densification: stock LichtFeld defaults (opacity_lr/regs/screen share)
-#   Config: config/lichtfeld_optimization_params.json
-#   Crop: --cropbox x0,y0,z0,x1,y1,z1 (from node crop_aabb.py; --no-crop to skip)
+# Locked 2026-10-29 (LFS v0.5.4.2 pin; config-primary recipe):
+#   Recipe knobs live in config/lichtfeld_optimization_params.json (mrnf, max_cap 1M, NC, bg_mode, …)
+#   Helper passes scene/runtime only: -d/-o, -i/-r, export/eval, cropbox, masks, --quiet
+#   Optional local experiments: --ld, --init, --no-exposure, --no-crop, --cropbox
 #
 # Usage:
 #   train_helper.sh <scene> <out>
@@ -18,11 +14,8 @@
 #   train_helper.sh --ld 50 <scene> <out>
 #   train_helper.sh --init dense.ply <scene> <out>
 #   train_helper.sh --cropbox x0,y0,z0,x1,y1,z1 <scene> <out>
-#   train_helper.sh --no-sparsity <scene> <out>
 #
 # Optional env:
-#   SPLATTER_ENABLE_SPARSITY   0/off (default) or 1/on — optional POPSpa via LFS CLI
-#   POPSPA_TARGET_COUNT        default 750000
 #   LFS_EXE / LICHTFELD_BIN  path to LichtFeld-Studio binary
 #   LFS_ROOT                 LichtFeld tree (default: /app/LichtFeld-Studio)
 #   LFS_PYTHON               Python for optional results summary
@@ -34,7 +27,7 @@ HELPER_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LFS_ROOT="${LFS_ROOT:-/app/LichtFeld-Studio}"
 
 usage() {
-  echo "usage: $0 [-i iterations] [-r resize] [--init PLY] [--cropbox X0,Y0,Z0,X1,Y1,Z1] [--no-exposure] [--no-crop] [--ld WEIGHT] [--enable-sparsity|--no-sparsity] <scene> <out>" >&2
+  echo "usage: $0 [-i iterations] [-r resize] [--init PLY] [--cropbox X0,Y0,Z0,X1,Y1,Z1] [--no-exposure] [--no-crop] [--ld WEIGHT] <scene> <out>" >&2
   exit 2
 }
 
@@ -45,8 +38,6 @@ USE_CROP=1
 CROPBOX=""
 LD_WEIGHT="0"
 INIT_PLY=""
-ENABLE_SPARSITY="${SPLATTER_ENABLE_SPARSITY:-0}"
-POPSPA_TARGET_COUNT="${POPSPA_TARGET_COUNT:-750000}"
 SCENE=""
 OUT=""
 
@@ -88,14 +79,6 @@ while [[ $# -gt 0 ]]; do
       [[ $# -ge 2 ]] || usage
       INIT_PLY="$2"
       shift 2
-      ;;
-    --enable-sparsity)
-      ENABLE_SPARSITY=1
-      shift
-      ;;
-    --no-sparsity)
-      ENABLE_SPARSITY=0
-      shift
       ;;
     -h|--help)
       usage
@@ -206,11 +189,11 @@ fi
 
 mkdir -p "${OUT}"
 
-echo "==> skip MoGe preprocess (self-supervised geo only; no depth/normal priors)"
+echo "==> skip MoGe preprocess (normals via LFS auto-generate when config enables priors)"
 echo "    scene=${SCENE}"
 
 if [[ "${EXPOSURE}" -eq 1 ]]; then
-  EXPOSURE_LABEL=on
+  EXPOSURE_LABEL=config
 else
   EXPOSURE_LABEL=off
 fi
@@ -221,32 +204,17 @@ else
   LD_LABEL="${LD_WEIGHT}"
 fi
 
-echo "==> train self-supervised geo recipe"
+echo "==> train (config-primary recipe)"
 echo "    iters=${ITERATIONS}  resize=${RESIZE_FACTOR}  out=${OUT}"
-echo "    NC=0.1 flatten=0.1 start=LFS-default prior_normals=off depth_ssi=off Ld=${LD_LABEL} exposure=${EXPOSURE_LABEL}"
+echo "    Ld=${LD_LABEL} exposure=${EXPOSURE_LABEL}"
 if [[ -n "${INIT_PLY}" ]]; then
   echo "    init=${INIT_PLY}"
 fi
 if [[ "${USE_SIDECAR_MASKS}" -eq 1 ]]; then
   echo "    masks=${SCENE}/masks (mask-mode=ignore, no-alpha-as-mask)"
 fi
-echo "    densify=stock LFS defaults (opacity_lr=0.025 reg=0.01 screen_share=0.3 split=0.15)"
 echo "    config=${CONFIG}"
 echo "    export=ply,sog"
-
-sparsity_enabled() {
-  case "${ENABLE_SPARSITY}" in
-    1|true|TRUE|yes|YES|on|ON) return 0 ;;
-    *) return 1 ;;
-  esac
-}
-
-if sparsity_enabled; then
-  SPARSITY_LABEL="POPSpa target=${POPSPA_TARGET_COUNT}"
-else
-  SPARSITY_LABEL=off
-fi
-echo "    sparsity=${SPARSITY_LABEL}"
 
 TRAIN_CMD=(
   "${EXE}"
@@ -255,32 +223,21 @@ TRAIN_CMD=(
   --config "${CONFIG}"
   -d "${SCENE}"
   -o "${OUT}"
-  --strategy mrnf
-  --max-cap 1000000
   -i "${ITERATIONS}"
   -r "${RESIZE_FACTOR}"
-  # Pin export stem to requested train iters. POPSpa adds sparsify+refine steps
-  # (default +10k → total 40k); without this LFS names files splat_<total>.ply
-  # and post-train filter looks for splat_${ITERATIONS}.ply.
   --output-name "splat_${ITERATIONS}"
   --eval
   --eval-steps "${ITERATIONS}"
   --export "ply,sog"
-  --use-normal-loss
-  --normal-loss-weight 0
-  --no-normal-auto-generate
-  --normal-consistency-weight 0.1
-  --normal-flatten-weight 0.1
   --quiet
 )
 
-# Only emit L_d CLI when weight > 0 (requires binary with --use-depth-distortion).
 if [[ -n "${LD_WEIGHT}" && "${LD_WEIGHT}" != "0" && "${LD_WEIGHT}" != "0.0" ]]; then
   TRAIN_CMD+=(--use-depth-distortion --depth-distortion-weight "${LD_WEIGHT}")
 fi
 
-if [[ "${EXPOSURE}" -eq 1 ]]; then
-  TRAIN_CMD+=(--exposure-correction)
+if [[ "${EXPOSURE}" -eq 0 ]]; then
+  TRAIN_CMD+=(--no-exposure-correction)
 fi
 
 if [[ -n "${INIT_PLY}" ]]; then
@@ -304,17 +261,12 @@ if [[ "${USE_SIDECAR_MASKS}" -eq 1 ]]; then
   TRAIN_CMD+=(--mask-mode ignore --no-alpha-as-mask)
 fi
 
-if sparsity_enabled; then
-  TRAIN_CMD+=(--enable-sparsity --popspa-target-count "${POPSPA_TARGET_COUNT}")
-fi
-
 "${TRAIN_CMD[@]}"
 
 echo "==> results summary (PSNR / LEP)"
 if [[ ! -f "${SUMMARY_PY}" ]]; then
   echo "warning: skipping results summary (missing ${SUMMARY_PY})" >&2
 else
-  # Soft-fail: product jobs must not die on missing cv2 / LEP tooling.
   set +e
   "${PYTHON}" "${SUMMARY_PY}" \
     --out-dir "${OUT}" \

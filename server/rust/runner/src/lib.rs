@@ -977,10 +977,6 @@ impl compute_runner_api::Runner for SplatterRunner {
                 "--iterations".to_string(),
                 splatter_iterations(),
             ];
-            // Product default: POPSpa on (override with SPLATTER_ENABLE_SPARSITY=0).
-            if bool_env("SPLATTER_ENABLE_SPARSITY", true) {
-                args.push("--enable_sparsity".to_string());
-            }
             if bool_env("SPLATTER_REUSE_TRAINED", false) {
                 args.push("--reuse_trained".to_string());
             }

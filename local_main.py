@@ -10,16 +10,9 @@ import subprocess
 import crop_aabb
 import black_pixel_masks
 
-LICHTFELD_BIN = os.environ.get("LICHTFELD_BIN", "/app/LichtFeld-Studio/build/LichtFeld-Studio")
 LICHTFELD_TRAIN_HELPER = os.environ.get(
     "LICHTFELD_TRAIN_HELPER", "/app/scripts/train_helper.sh"
 )
-LICHTFELD_CONFIG = os.environ.get("LICHTFELD_CONFIG", "config/lichtfeld_optimization_params.json")
-
-
-def _default_enable_sparsity() -> bool:
-    v = os.environ.get("SPLATTER_ENABLE_SPARSITY", "0").strip().lower()
-    return v not in ("0", "false", "no", "off")
 
 
 _TRAINING_RE = re.compile(
@@ -94,106 +87,56 @@ def _run_training_cmd(cmd: list[str]) -> None:
         raise subprocess.CalledProcessError(ret, cmd)
 
 
-def _train_splat_legacy(
+def train_splat(
     colmap_dir: Path,
     output_dir: Path,
-    images_dir: Path,
-    iterations: int,
-    enable_sparsity: bool,
-    sparsify_steps: int,
-    init_ply: Path | None,
+    images_dir: Path = None,
+    iterations: int = 30000,
+    use_crop: bool = True,
 ) -> None:
-    """Direct LichtFeld Studio invocation (frozen ``/splatter/colmap/v1`` path)."""
+    if not images_dir:
+        images_dir = colmap_dir / "images"
+
+    scene_dir = _prepare_helper_scene(colmap_dir, images_dir)
+    black_pixel_masks.ensure_black_pixel_masks(scene_dir / "images", scene_dir=scene_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
     cmd = [
-        LICHTFELD_BIN,
-        "-d", str(colmap_dir),
-        "-o", str(output_dir),
-        "-r", "2",
-        "--ppisp",
-        "-i", str(iterations),
-        "--images", os.path.abspath(str(images_dir)),
-        "--config", LICHTFELD_CONFIG,
-        "--headless",
+        LICHTFELD_TRAIN_HELPER,
+        "-i",
+        str(iterations),
+        "-r",
+        "2",
+        str(scene_dir),
+        str(output_dir),
     ]
-
-    if enable_sparsity:
-        cmd.append("--enable-sparsity")
-        cmd.append("--sparsify-steps")
-        cmd.append(str(sparsify_steps))
-
-    if init_ply is not None:
-        cmd.extend(["--init", str(init_ply)])
-
+    if not use_crop:
+        cmd.append("--no-crop")
+    else:
+        try:
+            cropbox = crop_aabb.compute_training_cropbox(
+                init_ply=None,
+                colmap_dir=colmap_dir,
+            )
+            cmd.extend(["--cropbox", cropbox])
+        except (FileNotFoundError, ValueError) as exc:
+            print(
+                f"[train_splat] crop AABB skipped ({exc}); training without --cropbox",
+                flush=True,
+            )
     _run_training_cmd(cmd)
 
 
-def train_splat(colmap_dir: Path, output_dir: Path, images_dir: Path = None,
-                iterations: int = 30000,
-                enable_sparsity: bool | None = None, sparsify_steps: int = 15000,
-                init_ply: Path = None, use_train_helper: bool = True,
-                use_crop: bool = True):
-    if not images_dir:
-        images_dir = colmap_dir / "images"
-    if enable_sparsity is None:
-        enable_sparsity = _default_enable_sparsity()
-
-    if use_train_helper:
-        # train_helper path: LFS v0.5.4.2 recipe (L_d off), NC=0.1, flatten=0.1,
-        # max_cap 1M; POPSpa only when enable_sparsity.
-        scene_dir = _prepare_helper_scene(colmap_dir, images_dir)
-        black_pixel_masks.ensure_black_pixel_masks(scene_dir / "images", scene_dir=scene_dir)
-        output_dir.mkdir(parents=True, exist_ok=True)
-        cmd = [
-            LICHTFELD_TRAIN_HELPER,
-            "-i", str(iterations),
-            "-r", "2",
-            str(scene_dir),
-            str(output_dir),
-        ]
-        if init_ply is not None:
-            cmd.extend(["--init", str(init_ply)])
-        if enable_sparsity:
-            cmd.append("--enable-sparsity")
-        else:
-            cmd.append("--no-sparsity")
-        if not use_crop:
-            cmd.append("--no-crop")
-        else:
-            try:
-                cropbox = crop_aabb.compute_training_cropbox(
-                    init_ply=init_ply,
-                    colmap_dir=colmap_dir,
-                )
-                cmd.extend(["--cropbox", cropbox])
-            except (FileNotFoundError, ValueError) as exc:
-                print(
-                    f"[train_splat] crop AABB skipped ({exc}); training without --cropbox",
-                    flush=True,
-                )
-        _run_training_cmd(cmd)
-        return
-
-    _train_splat_legacy(
-        colmap_dir,
-        output_dir,
-        images_dir,
-        iterations,
-        enable_sparsity,
-        sparsify_steps,
-        init_ply,
-    )
-
-def scan_main(job_root: Path, scan_id: str, iterations: int = 30000,
-              enable_sparsity: bool | None = None, sparsify_steps: int = 15000,
-              reuse_trained: bool = False,
-              do_convert_splat: bool = False, do_convert_sog: bool = False,
-              bundle_adjust: bool = True) -> None:
-    if enable_sparsity is None:
-        enable_sparsity = _default_enable_sparsity()
+def scan_main(
+    job_root: Path,
+    scan_id: str,
+    iterations: int = 30000,
+    reuse_trained: bool = False,
+    do_convert_splat: bool = False,
+    do_convert_sog: bool = False,
+    bundle_adjust: bool = True,
+) -> None:
     start_time = time.time()
 
-    # train_helper passes --output-name splat_{iterations} so POPSpa extra steps
-    # do not rename the export (LFS default would be splat_<total_iters>).
     splat_filename = f"splat_{iterations}"
     splat_dir = job_root / "refined" / "local" / scan_id / "splat"
     images_dir = job_root / "refined" / "local" / scan_id / "dense" / "images"
@@ -203,8 +146,7 @@ def scan_main(job_root: Path, scan_id: str, iterations: int = 30000,
     else:
         preprocessing.main(job_root, scan_id, bundle_adjust=bundle_adjust)
 
-        train_splat(colmap_dir, splat_dir, images_dir, iterations=iterations,
-                    enable_sparsity=enable_sparsity, sparsify_steps=sparsify_steps)
+        train_splat(colmap_dir, splat_dir, images_dir, iterations=iterations)
 
     filtered_ply = splat_dir / f"{splat_filename}.filtered.ply"
     filter_args = argparse.Namespace(
@@ -212,8 +154,6 @@ def scan_main(job_root: Path, scan_id: str, iterations: int = 30000,
         output_ply=filtered_ply,
         colmap_path=colmap_dir,
         overwrite=True,
-        # Post-prune near-transparent veil (logit -3.5 ≈ sigmoid 0.03;
-        # slightly above train min_opacity=0.02).
         min_opacity=-3.5,
         max_size=1.5,
         min_size=0.001,
@@ -221,8 +161,6 @@ def scan_main(job_root: Path, scan_id: str, iterations: int = 30000,
         view_min_depth=0.1,
         view_max_depth=5.0,
         outlier_radius=None,
-        #outlier_radius=0.3,
-        #outlier_neighbors=30
     )
 
     filter_splats.main(filter_args)
@@ -230,7 +168,6 @@ def scan_main(job_root: Path, scan_id: str, iterations: int = 30000,
     if not filtered_ply.exists():
         raise FileNotFoundError(f"Filtered PLY was not produced: {filtered_ply}")
 
-    # Bool flags must not share names with the convert_splat module.
     if do_convert_splat:
         convert_splat.convert_ply_to_splat(filtered_ply)
     if do_convert_sog:
@@ -239,28 +176,25 @@ def scan_main(job_root: Path, scan_id: str, iterations: int = 30000,
     end_time = time.time()
     print(f"Local splatting DONE in {end_time - start_time} seconds: {scan_id}")
 
-def main(job_root: Path,
-         scan_ids: list[str],
-         iterations: int = 30000,
-         enable_sparsity: bool | None = None,
-         sparsify_steps: int = 15000,
-         reuse_trained: bool = False,
-         do_convert_splat: bool = False,
-         do_convert_sog: bool = False,
+
+def main(
+    job_root: Path,
+    scan_ids: list[str],
+    iterations: int = 30000,
+    reuse_trained: bool = False,
+    do_convert_splat: bool = False,
+    do_convert_sog: bool = False,
 ) -> None:
-    if enable_sparsity is None:
-        enable_sparsity = _default_enable_sparsity()
     for scan_id in scan_ids:
         scan_main(
             job_root,
             scan_id,
             iterations=iterations,
-            enable_sparsity=enable_sparsity,
-            sparsify_steps=sparsify_steps,
             reuse_trained=reuse_trained,
             do_convert_splat=do_convert_splat,
             do_convert_sog=do_convert_sog,
         )
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -270,22 +204,17 @@ if __name__ == "__main__":
     parser.add_argument("--iterations", type=int, default=30000)
     parser.add_argument("--reuse-trained", action="store_true", default=False)
     parser.add_argument(
-        "--enable-sparsity",
-        action="store_true",
-        default=None,
-        help="Enable POPSpa sparsity (default: SPLATTER_ENABLE_SPARSITY or off)",
-    )
-    parser.add_argument(
-        "--no-sparsity",
+        "--convert-splat",
         action="store_true",
         default=False,
-        help="Disable POPSpa sparsity",
+        help="Also output as .splat format",
     )
-    parser.add_argument("--sparsify-steps", type=int, default=15000)
-    parser.add_argument("--convert-splat", action="store_true", default=False,
-                        help="Also output as .splat format")
-    parser.add_argument("--convert-sog", action="store_true", default=False,
-                        help="Also output as .sog format")
+    parser.add_argument(
+        "--convert-sog",
+        action="store_true",
+        default=False,
+        help="Also output as .sog format",
+    )
 
     args = parser.parse_args()
     print(f"args: {args}")
@@ -297,18 +226,11 @@ if __name__ == "__main__":
         scan_ids = [f.name for f in (args.job_root / "datasets").iterdir() if f.is_dir()]
     else:
         scan_ids = [args.scan_id]
-    if args.no_sparsity:
-        enable_sparsity = False
-    elif args.enable_sparsity:
-        enable_sparsity = True
-    else:
-        enable_sparsity = _default_enable_sparsity()
-    main(job_root=args.job_root,
-         scan_ids=scan_ids,
-         iterations=args.iterations,
-         enable_sparsity=enable_sparsity,
-         sparsify_steps=args.sparsify_steps,
-         reuse_trained=args.reuse_trained,
-         do_convert_splat=args.convert_splat,
-         do_convert_sog=args.convert_sog)
-
+    main(
+        job_root=args.job_root,
+        scan_ids=scan_ids,
+        iterations=args.iterations,
+        reuse_trained=args.reuse_trained,
+        do_convert_splat=args.convert_splat,
+        do_convert_sog=args.convert_sog,
+    )

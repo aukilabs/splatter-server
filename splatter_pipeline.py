@@ -132,7 +132,7 @@ def _progress(stage: str, pct: int | None = None, detail: str = "") -> None:
     print(" ".join(parts), flush=True)
 
 
-def run_colmap_single_splat(job_root: Path, iterations: int, enable_sparsity: bool) -> dict:
+def run_colmap_single_splat(job_root: Path, iterations: int) -> dict:
     """DMT colmap/v1 product: Splattr preprocess + train, then filter→rotate→``splat_rot.splat``."""
     scan_ids = discover_scan_ids(job_root)
     if not scan_ids:
@@ -188,16 +188,12 @@ def run_colmap_single_splat(job_root: Path, iterations: int, enable_sparsity: bo
 
     colmap_sparse = dense_dir / "sparse"
     images_dir = dense_dir / "images"
-    sparsify_steps = 15000 if enable_sparsity else 0
     _progress("training", 20, "starting gaussian splatting training")
     local_main.train_splat(
         colmap_dir=colmap_sparse,
         output_dir=splat_dir,
         images_dir=images_dir,
         iterations=iterations,
-        enable_sparsity=enable_sparsity,
-        sparsify_steps=sparsify_steps,
-        use_train_helper=True,
     )
 
     _progress("filtering", 85, "filtering gaussians")
@@ -247,7 +243,6 @@ def run_local_only(
     job_root: Path,
     scan_ids: list[str],
     iterations: int,
-    enable_sparsity: bool,
     reuse_trained: bool,
     convert_to_splat: bool,
     convert_to_sog: bool,
@@ -267,8 +262,6 @@ def run_local_only(
         job_root=job_root,
         scan_ids=scan_ids,
         iterations=iterations,
-        enable_sparsity=enable_sparsity,
-        sparsify_steps=15000 if enable_sparsity else 0,
         reuse_trained=reuse_trained,
         do_convert_splat=convert_to_splat,
         do_convert_sog=convert_to_sog,
@@ -315,7 +308,6 @@ def run_global_only(
         job_root=job_root,
         scan_ids=scan_ids,
         base_filename=f"splat_{iterations}",
-        sparsify_steps=0,
         use_filtered=use_filtered,
         do_partition=partition,
         partition_size=partition_size,
@@ -364,18 +356,6 @@ def main() -> None:
     parser.add_argument("--job_root_path", type=Path, required=True)
     parser.add_argument("--scan_ids", type=str, default="")
     parser.add_argument("--iterations", type=int, default=30000)
-    parser.add_argument(
-        "--enable_sparsity",
-        action="store_true",
-        default=_bool_env("SPLATTER_ENABLE_SPARSITY", True),
-        help="POPSpa after train (default on; set SPLATTER_ENABLE_SPARSITY=0 to disable)",
-    )
-    parser.add_argument(
-        "--no_enable_sparsity",
-        action="store_true",
-        default=False,
-        help="Disable POPSpa even if env default is on",
-    )
     parser.add_argument("--reuse_trained", action="store_true", default=False)
     parser.add_argument("--use_filtered", action="store_true", default=True)
     parser.add_argument("--no_use_filtered", action="store_true", default=False)
@@ -396,14 +376,13 @@ def main() -> None:
         help="Suffix from refined_manifest_* (e.g. 2026-09-17_14-55-56) for domain SOG naming",
     )
     args = parser.parse_args()
-    enable_sparsity = args.enable_sparsity and not args.no_enable_sparsity
 
     job_root = args.job_root_path
     job_root.mkdir(parents=True, exist_ok=True)
     scan_ids = parse_scan_ids(args.scan_ids)
 
     if args.mode == "colmap_v1_single_splat":
-        run_colmap_single_splat(job_root, args.iterations, enable_sparsity)
+        run_colmap_single_splat(job_root, args.iterations)
     elif args.mode == "local_only":
         convert_flags = {
             f
@@ -425,7 +404,6 @@ def main() -> None:
             job_root=job_root,
             scan_ids=scan_ids,
             iterations=args.iterations,
-            enable_sparsity=enable_sparsity,
             reuse_trained=args.reuse_trained,
             convert_to_splat=convert_to_splat,
             convert_to_sog=convert_to_sog,
