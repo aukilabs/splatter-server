@@ -21,9 +21,19 @@ class TrainHelperRecipeContractTest(unittest.TestCase):
     def test_config_recipe_source_of_truth(self):
         data = json.loads(LFS_CONFIG.read_text(encoding="utf-8"))
         opt = data["optimization"]
+        self.assertEqual(opt["strategy"], "mrnf")
         self.assertEqual(opt["max_cap"], 1_000_000)
         self.assertEqual(opt["bg_mode"], "random")
         self.assertFalse(opt["bg_modulation"])
+        self.assertFalse(opt["use_depth_loss"])
+        self.assertTrue(opt["use_normal_loss"])
+        self.assertEqual(opt["normal_loss_weight"], 0.05)
+        self.assertEqual(opt["normal_consistency_weight"], 0.01)
+        self.assertEqual(opt["normal_flatten_weight"], 0.1)
+        self.assertTrue(opt["normal_auto_generate"])
+        self.assertEqual(opt["max_screen_share"], 0.2)
+        self.assertEqual(opt["oversize_split_fraction"], 0.25)
+        self.assertEqual(opt["min_opacity"], 0.01)
         for key in (
             "enable_sparsity",
             "popspa_target_count",

@@ -1,7 +1,6 @@
 ##
 ## Multi-stage: rust-build → lichtfeld-build → lean runtime (no /app/vcpkg tree).
-## Full image rebuild (rare): `docker build -f Dockerfile -t splatter-server:v0.2-dev .`
-## Fast iter: `Dockerfile.r2-overlay` on `splatter-server:v0.2-dev` (pipeline/helper/config/Rust; optional deps via INSTALL_REQUIREMENTS=1).
+## Build: `docker build -f Dockerfile -t splatter-server:v0.2-dev .`
 ##
 ARG SPLATTER_VERSION=0.0.0-local
 

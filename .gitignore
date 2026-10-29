@@ -65,6 +65,9 @@ splatter-bin-new
 !config/**
 !third_party/**
 
+# Local praxis plans (keep on disk; do not track)
+plans/
+
 # Densify weights cache (lazy download; never bake into git)
 **/romav2.pt
 

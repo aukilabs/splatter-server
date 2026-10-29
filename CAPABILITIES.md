@@ -4,8 +4,7 @@ This document defines the runtime contract for the splatter capabilities impleme
 
 ## Docker images (v0.2)
 
-- **Full image:** multi-stage `Dockerfile` (rust → LichtFeld build → lean runtime without `/app/vcpkg`). Tag e.g. `splatter-server:v0.2-dev`; rebuild when LichtFeld pin or base CUDA stack changes.
-- **Fast iter:** `Dockerfile.r2-overlay` on `splatter-server:v0.2-dev` — Rust binary, pipeline Python, helper, config; pass `--build-arg INSTALL_REQUIREMENTS=1` to refresh `requirements.txt` in the venv without a full rebuild.
+- **Image:** multi-stage `Dockerfile` (rust → LichtFeld build → lean runtime without `/app/vcpkg`). Tag e.g. `splatter-server:v0.2-dev`; rebuild when LichtFeld pin, base CUDA stack, or product Python/config changes.
 
 ## Product artifact split (v0.2)
 
