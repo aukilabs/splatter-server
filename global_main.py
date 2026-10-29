@@ -186,7 +186,7 @@ if __name__ == "__main__":
     
     if args.scan_ids is None:
         datasets_dir = args.job_root / "datasets"
-        scan_ids = [f.name for f in datasets_dir.iterdir() if f.is_dir()][-20:]
+        scan_ids = [f.name for f in datasets_dir.iterdir() if f.is_dir()]
     else:
         scan_ids = args.scan_ids
     
