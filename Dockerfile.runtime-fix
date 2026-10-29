@@ -1,0 +1,10 @@
+# Thin runtime dep fix on top of a full multi-stage bake.
+# Prefer baking libgtk-3-0 into Dockerfile (stage 3) on the next full rebuild.
+ARG BASE_IMAGE=splatter-server:v0.2-dev
+FROM ${BASE_IMAGE}
+USER root
+# Clear LD_LIBRARY_PATH so apt/dpkg does not pick vcpkg libdbus over system dbus.
+RUN apt-get update && \
+    LD_LIBRARY_PATH= apt-get install -y --no-install-recommends libgtk-3-0 && \
+    rm -rf /var/lib/apt/lists/*
+USER 1000:1000

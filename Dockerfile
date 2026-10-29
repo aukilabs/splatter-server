@@ -127,6 +127,7 @@ RUN apt-get update && \
         libgl1 \
         libxi6 \
         libxrandr2 \
+        libgtk-3-0 \
     && rm -rf /var/lib/apt/lists/*
 
 # SOG conversion binary
