@@ -207,57 +207,8 @@ def remove_masked_images(rec: pycolmap.Reconstruction) -> pycolmap.Reconstructio
     return rec
 
 
-def run_bundle_adjustment(rec: pycolmap.Reconstruction, refine_camera_poses: bool = True) -> pycolmap.Reconstruction:
-    """Run bundle adjustment with fixed poses, only refining intrinsics (focal length and radial distortion)."""
-    # Convert cameras from SIMPLE_PINHOLE/PINHOLE to SIMPLE_RADIAL/RADIAL to allow distortion refinement
-    converted_counts = {}
-    for cam_id in rec.cameras:
-        cam = rec.cameras[cam_id]
-        old_model = cam.model
-        if old_model == pycolmap.CameraModelId.SIMPLE_RADIAL or old_model == pycolmap.CameraModelId.RADIAL:
-            print(f"Camera {cam_id} is already in SIMPLE_RADIAL model, skipping")
-            continue
-        
-        if old_model == pycolmap.CameraModelId.SIMPLE_PINHOLE:
-            f, cx, cy = cam.params
-            new_model = pycolmap.CameraModelId.SIMPLE_RADIAL
-            params = [f, cx, cy, 0.0]
-        elif old_model == pycolmap.CameraModelId.PINHOLE:
-            fx, fy, cx, cy = cam.params
-            new_model = pycolmap.CameraModelId.RADIAL
-            params = [fx, fy, cx, cy, 0.0]
-        else:
-            raise ValueError(f"Unsupported camera model: {old_model}")
-        new_cam = pycolmap.Camera(
-            model=new_model,
-            width=cam.width,
-            height=cam.height,
-            params=params,
-            camera_id=cam_id
-        )
-        rec.cameras[cam_id] = new_cam
-
-        if (old_model, new_model) not in converted_counts:
-            converted_counts[(old_model, new_model)] = 0
-        converted_counts[(old_model, new_model)] += 1
-    
-    for (old_model, new_model), count in converted_counts.items():
-        print(f"Converted {count} cameras from {old_model} to {new_model}")
-
-    ba_options = pycolmap.BundleAdjustmentOptions()
-    ba_options.refine_focal_length = True
-    ba_options.refine_principal_point = False  # Keep cx, cy fixed
-    ba_options.refine_extra_params = True  # Refine radial distortion k
-    ba_options.refine_rig_from_world = refine_camera_poses
-    ba_options.solver_options.max_num_iterations = 20  # Few iterations, stay close to original
-    
-    pycolmap.bundle_adjustment(rec, ba_options)
-    print(f"Bundle adjustment complete: {rec.summary()}")
-    return rec
-
-
 def preprocess(
-    colmap_dir: Path, processed_dir: Path, frames_dir: Path = None, bundle_adjust: bool = False,
+    colmap_dir: Path, processed_dir: Path, frames_dir: Path = None,
     camera_min_3d_points: int = 50, # Remove images/cams which see few points (after outlier filtering)
     point_min_view_count: int = 4,
     view_count_max_depth: float = 2.5, # Used for both point and camera filtering
@@ -267,12 +218,8 @@ def preprocess(
     print(f"Loaded colmap reconstruction: {rec.summary()}")
     print(rec.summary())
 
-    if bundle_adjust:
-        rec = run_bundle_adjustment(rec, refine_camera_poses=False)
-
     rec = cleanup_rec_cameras(rec, camera_min_3d_points, view_count_max_depth, frames_dir=frames_dir)
     rec = cleanup_rec_points(rec, point_min_view_count, view_count_max_depth)
-    #rec = rec_points_from_alphashape(rec)
 
     rec.write(str(processed_dir))
     print(f"Cleaned colmap reconstruction written to: {processed_dir}")
@@ -325,7 +272,7 @@ def undistort_merged_colmap(
     )
 
 
-def scan_main(job_root: Path, scan_id: str, bundle_adjust: bool = False):
+def scan_main(job_root: Path, scan_id: str):
     print(f"Processing scan {scan_id}...")
 
     frames_dir = job_root / "datasets" / scan_id / "Frames"
@@ -348,21 +295,21 @@ def scan_main(job_root: Path, scan_id: str, bundle_adjust: bool = False):
     if not dense_dir.exists():
         dense_dir.mkdir(parents=True, exist_ok=True)
 
-    preprocess(colmap_dir, processed_dir, frames_dir=frames_dir, bundle_adjust=bundle_adjust)
+    preprocess(colmap_dir, processed_dir, frames_dir=frames_dir)
     pycolmap.undistort_images(
         output_path=str(dense_dir),
         input_path=str(processed_dir),
         image_path=str(frames_dir)
     )
 
-def main(job_root: Path, scan_id: str = None, bundle_adjust: bool = False):
+def main(job_root: Path, scan_id: str = None):
     if scan_id is None:
         scan_ids = [f.name for f in (job_root / "datasets").iterdir() if f.is_dir()]
         print(f"--scan-ids not provided, processing all {len(scan_ids)} scans in the dataset directory")
         for scan_id in scan_ids:
-            scan_main(job_root, scan_id, bundle_adjust=bundle_adjust)
+            scan_main(job_root, scan_id)
     else:
-        scan_main(job_root, scan_id, bundle_adjust=bundle_adjust)
+        scan_main(job_root, scan_id)
 
 if __name__ == "__main__":
     args = argparse.ArgumentParser()

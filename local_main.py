@@ -133,7 +133,6 @@ def scan_main(
     reuse_trained: bool = False,
     do_convert_splat: bool = False,
     do_convert_sog: bool = False,
-    bundle_adjust: bool = True,
 ) -> None:
     start_time = time.time()
 
@@ -144,7 +143,7 @@ def scan_main(
     if reuse_trained and (splat_dir / f"{splat_filename}.ply").exists():
         print("Splat reuse enabled, skip ahead to filtering")
     else:
-        preprocessing.main(job_root, scan_id, bundle_adjust=bundle_adjust)
+        preprocessing.main(job_root, scan_id)
 
         train_splat(colmap_dir, splat_dir, images_dir, iterations=iterations)
 

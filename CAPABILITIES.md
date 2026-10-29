@@ -18,9 +18,9 @@ Colmap keeps the v0.1 **filter → rotate → `.splat`** contract for DMT. Local
 
 ## Trainer recipe (local + colmap)
 
-Locked 2026-10-28 (LichtFeld Studio **v0.5.4.2**; Splattr preprocess + short bundle adjustment; no RoMa densify; no monodepth priors; train-time Gaussian densification = stock LFS defaults):
+Locked 2026-10-28 (LichtFeld Studio **v0.5.4.2**; Splattr preprocess; no RoMa densify; no monodepth priors; train-time Gaussian densification = stock LFS defaults):
 
-Product **local** + **colmap** paths: Splattr **`preprocessing.main`** / **`preprocess` + undistort** (bundle adjustment **on** by default) → sparse COLMAP in `dense/` → `train_helper.sh` (no custom `--init`).
+Product **local** + **colmap** paths: Splattr **`preprocessing.main`** / **`preprocess` + undistort** → sparse COLMAP in `dense/` → `train_helper.sh` (no custom `--init`).
 
 | Knob | Value |
 |---|---|
@@ -51,7 +51,7 @@ Recipe source of truth: **`config/lichtfeld_optimization_params.json`**. `script
 ## Preprocessing: Splattr only (no MoGe, no RoMa, no VDA)
 
 1. **`preprocessing.py` (product path)**  
-   Full Splattr preprocess (camera/point cleanup, optional **short bundle adjustment**) + undistort into `dense/`. Black occlusion boxes → train **`masks/`** sidecars (not frame drop). No RoMa densification; no Video-Depth-Anything.
+   Full Splattr preprocess (camera/point cleanup) + undistort into `dense/`. Black occlusion boxes → train **`masks/`** sidecars (not frame drop). No RoMa densification; no Video-Depth-Anything.
 
 2. **`train_helper.sh`**  
    **Skips MoGe preprocess.** Recipe (NC / flatten / prior normals / screen-share / min_opacity) comes from **config JSON** only.
@@ -65,7 +65,7 @@ Recipe source of truth: **`config/lichtfeld_optimization_params.json`**. `script
 ## Capability: `/splatter/colmap/v1`
 
 - **Trainer**: `scripts/train_helper.sh` (config-primary; `-i` default **30000**, `-r 2`; exports `ply,sog`). Post-filter opacity prune logit `-3.5` (≈0.03).
-- **Pipeline** (`splatter_pipeline.py` `colmap_v1_single_splat`): merged frames + global COLMAP → Splattr preprocess + undistort (BA **on**) → same train_helper path as local (masks, cropbox) → filter → coordinate transform → **`refined/splatter/splat_rot.splat`**. Runner uploads that file only (no SOG product).
+- **Pipeline** (`splatter_pipeline.py` `colmap_v1_single_splat`): merged frames + global COLMAP → Splattr preprocess + undistort → same train_helper path as local (masks, cropbox) → filter → coordinate transform → **`refined/splatter/splat_rot.splat`**. Runner uploads that file only (no SOG product).
 - **Status**: Backward-compatible required output kept.
 - **Runner defaults** (override via env; local/global differ — see table above):
   - `SPLATTER_CONVERT_TO_SOG=false` (colmap default; train SOG on disk is not uploaded)
