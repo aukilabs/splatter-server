@@ -128,7 +128,7 @@ def main(job_root: Path, scan_ids: list[str],
          base_filename: str = "splat_30000",
          use_filtered: bool = True,
          do_partition: bool = True, partition_size: float = 10.0,
-         do_convert_splat: bool = True, do_convert_sog: bool = False) -> dict:
+         do_convert_splat: bool = False) -> dict:
     """
     Run global splat processing pipeline.
     
@@ -139,7 +139,7 @@ def main(job_root: Path, scan_ids: list[str],
     # Step 1: Combine splats
     combined_ply_path = combine(job_root, scan_ids, use_filtered, base_filename)
 
-    # Step 2: Split into coarse/fine LODs (Fairprice filter on combined hub)
+    # Step 2: Split into coarse/fine LODs
     coarse_ply, fine_ply = split_coarse_fine(combined_ply_path)
 
     # Step 3: Partition each LOD if requested
@@ -148,12 +148,11 @@ def main(job_root: Path, scan_ids: list[str],
         partition_paths.extend(partition(coarse_ply, partition_size, "coarse"))
         partition_paths.extend(partition(fine_ply, partition_size, "fine"))
 
-    # Step 4: Convert partition formats only (skip unpartitioned hub/LOD PLYs)
+    # Step 4: Convert partition formats (SOG always; .splat optional)
     if do_convert_splat:
         convert_to_splat(partition_paths, skip_combined=False)
-    
-    if do_convert_sog:
-        convert_to_sog(partition_paths, skip_combined=False)
+
+    convert_to_sog(partition_paths, skip_combined=False)
     
     elapsed = time.time() - start_time
     print(f"[global] Done in {elapsed:.1f}s")
@@ -176,9 +175,13 @@ if __name__ == "__main__":
     parser.add_argument("--use-filtered", action="store_true", default=True)
     parser.add_argument("--no-partition", action="store_true", default=False)
     parser.add_argument("--partition-size", type=float, default=10.0)
-    parser.add_argument("--convert-splat", action="store_true", default=True)
-    parser.add_argument("--convert-sog", action="store_true", default=False)
-    
+    parser.add_argument(
+        "--convert-splat",
+        action="store_true",
+        default=False,
+        help="Also write .splat alongside product SOG partitions",
+    )
+
     args = parser.parse_args()
     
     if args.scan_ids is None:
@@ -195,6 +198,5 @@ if __name__ == "__main__":
         do_partition=not args.no_partition,
         partition_size=args.partition_size,
         do_convert_splat=args.convert_splat,
-        do_convert_sog=args.convert_sog,
     )
 

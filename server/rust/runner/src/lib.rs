@@ -146,13 +146,6 @@ fn splatter_iterations() -> String {
     env::var("SPLATTER_ITERATIONS").unwrap_or_else(|_| "30000".to_string())
 }
 
-fn convert_to_sog_default(mode: CapabilityMode) -> bool {
-    matches!(
-        mode,
-        CapabilityMode::GlobalV1 | CapabilityMode::LocalV1
-    )
-}
-
 fn convert_to_splat_default(mode: CapabilityMode) -> bool {
     matches!(mode, CapabilityMode::ColmapV1)
 }
@@ -984,9 +977,6 @@ impl compute_runner_api::Runner for SplatterRunner {
                 args.push("--scan_ids".to_string());
                 args.push(summary.scan_ids.join(","));
             }
-            if bool_env("SPLATTER_CONVERT_TO_SOG", convert_to_sog_default(mode)) {
-                args.push("--convert_to_sog".to_string());
-            }
             if !bool_env("SPLATTER_CONVERT_TO_SPLAT", convert_to_splat_default(mode)) {
                 args.push("--no_convert_to_splat".to_string());
             } else {
@@ -1762,15 +1752,9 @@ mod product_contract_tests {
     #[test]
     fn colmap_keeps_splat_defaults_local_global_sog_only() {
         assert!(
-            !convert_to_sog_default(CapabilityMode::ColmapV1),
-            "colmap must not default to SOG product conversion"
-        );
-        assert!(
             convert_to_splat_default(CapabilityMode::ColmapV1),
             "colmap defaults to .splat product path"
         );
-        assert!(convert_to_sog_default(CapabilityMode::LocalV1));
-        assert!(convert_to_sog_default(CapabilityMode::GlobalV1));
         assert!(!convert_to_splat_default(CapabilityMode::LocalV1));
         assert!(!convert_to_splat_default(CapabilityMode::GlobalV1));
     }

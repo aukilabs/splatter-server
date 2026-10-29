@@ -26,7 +26,6 @@ Product **local** + **colmap** paths: Splattr **`preprocessing.main`** / **`prep
 |---|---|
 | LichtFeld pin | **v0.5.4.2** (Docker `LICHTFELD_GIT_REF`) |
 | Strategy / max_cap / bg | **`config/lichtfeld_optimization_params.json`**: `mrnf`, **`max_cap=1_000_000`**, **`bg_mode=random`** (no recipe env vars) |
-| POPSpa / sparsity | **Not shipped** — absent from config and product CLI/env |
 | Export name | Helper passes LFS `--output-name splat_<iters>` (stable export stem) |
 | Iterations / resize | **30000** / **-r 2** |
 | Depth prior (SSI) | **off** |
@@ -68,7 +67,6 @@ Recipe source of truth: **`config/lichtfeld_optimization_params.json`**. `script
 - **Pipeline** (`splatter_pipeline.py` `colmap_v1_single_splat`): merged frames + global COLMAP → Splattr preprocess + undistort → same train_helper path as local (masks, cropbox) → filter → coordinate transform → **`refined/splatter/splat_rot.splat`**. Runner uploads that file only (no SOG product).
 - **Status**: Backward-compatible required output kept.
 - **Runner defaults** (override via env; local/global differ — see table above):
-  - `SPLATTER_CONVERT_TO_SOG=false` (colmap default; train SOG on disk is not uploaded)
   - `SPLATTER_CONVERT_TO_SPLAT=true` (product `.splat` path; colmap mode always produces `splat_rot.splat` regardless of CLI convert flags)
 - **Input expectation**:
   - Task input CID points to a manifest JSON containing `dataIDs`.
@@ -95,9 +93,7 @@ Recipe source of truth: **`config/lichtfeld_optimization_params.json`**. `script
 - **Primary outputs** (SOG-only product path):
   - `local_splat_sog_<scan_id>.local_splat_sog` (`data_type=local_splat_sog`) — one per scan.
   - No product upload of `local_splat_*` (`.splat`) or `local_splat_ply_*` on this capability.
-- **Runner defaults** (override via env):
-  - `SPLATTER_CONVERT_TO_SOG=true` (default for local)
-  - `SPLATTER_CONVERT_TO_SPLAT=false` (default for local)
+- **Outputs**: SOG is always produced (not configurable). Optional `SPLATTER_CONVERT_TO_SPLAT=true` also writes `.splat` on disk (not uploaded on this capability).
 
 ## Capability: `/splatter/global/v1`
 
@@ -116,9 +112,7 @@ Recipe source of truth: **`config/lichtfeld_optimization_params.json`**. `script
     - `manifestTimestamp` is the suffix from the input `refined_manifest_*` artifact (same refinement as the reconstruction).
     - No `splat_partition_full_*` artifacts on this path.
   - Partitioned `.splat` files are **not** produced or uploaded on this capability.
-- **Runner defaults** (override via env):
-  - `SPLATTER_CONVERT_TO_SOG=true` (default for global and local only)
-  - `SPLATTER_CONVERT_TO_SPLAT=false` (default for global and local only)
+- **Outputs**: SOG partitions are always produced (not configurable). Optional `SPLATTER_CONVERT_TO_SPLAT=true` also writes `.splat` on disk (not uploaded on this capability).
   - `SPLATTER_PARTITION_SIZE=10` (meters; global coarse/fine tiles)
   - Global combine accepts staged local SOG at `refined/local/<scan_id>/splat/splat_<iterations>.filtered.sog` (default iterations: 30000).
 - **Notes**:

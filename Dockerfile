@@ -129,11 +129,6 @@ RUN apt-get update && \
         libgtk-3-0 \
     && rm -rf /var/lib/apt/lists/*
 
-# SOG conversion binary
-RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
-    apt-get install -y nodejs && \
-    npm install -g @playcanvas/splat-transform
-
 WORKDIR /app
 
 # Compiled binary + direct shared-lib deps

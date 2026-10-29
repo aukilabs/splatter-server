@@ -202,11 +202,7 @@ def run_colmap_single_splat(job_root: Path, iterations: int) -> dict:
         output_ply=filtered_ply,
         colmap_path=colmap_sparse,
         overwrite=True,
-        # Post-prune near-transparent veil (logit -3.5 ≈ sigmoid 0.03;
-        # slightly above train min_opacity=0.02).
         min_opacity=-3.5,
-        #max_size=10.0,
-        #min_size=0.001,
         min_view_count=3,
         view_min_depth=0.1,
         view_max_depth=5.0,
@@ -243,7 +239,6 @@ def run_local_only(
     iterations: int,
     reuse_trained: bool,
     convert_to_splat: bool,
-    convert_to_sog: bool,
 ) -> dict:
     if not scan_ids:
         scan_ids = discover_scan_ids(job_root)
@@ -262,12 +257,10 @@ def run_local_only(
         iterations=iterations,
         reuse_trained=reuse_trained,
         do_convert_splat=convert_to_splat,
-        do_convert_sog=convert_to_sog,
     )
 
     _progress("postprocessing", 90, "staging outputs")
     output_dir = job_root / "output"
-    # Local product path: SOG-only uploads (PLY/splat remain on disk for debug/reuse).
     produced = []
     for scan_id in scan_ids:
         splat_dir = job_root / "refined" / "local" / scan_id / "splat"
@@ -275,8 +268,7 @@ def run_local_only(
         sog_file = splat_dir / f"{base}.sog"
         if not sog_file.exists():
             raise FileNotFoundError(
-                f"Local SOG product missing for {scan_id}: {sog_file} "
-                "(enable SOG conversion; local uploads are SOG-only)"
+                f"Local SOG product missing for {scan_id}: {sog_file}"
             )
         name = f"local_splat_sog_{scan_id}.local_splat_sog"
         stage_output(output_dir, sog_file, name)
@@ -293,7 +285,6 @@ def run_global_only(
     partition: bool,
     partition_size: float,
     convert_to_splat: bool,
-    convert_to_sog: bool,
     manifest_timestamp: str | None = None,
 ) -> dict:
     if not scan_ids:
@@ -310,7 +301,6 @@ def run_global_only(
         do_partition=partition,
         partition_size=partition_size,
         do_convert_splat=convert_to_splat,
-        do_convert_sog=convert_to_sog,
     )
 
     _progress("postprocessing", 80, "staging outputs")
@@ -366,7 +356,6 @@ def main() -> None:
     )
     parser.add_argument("--convert_to_splat", action="store_true", default=False)
     parser.add_argument("--no_convert_to_splat", action="store_true", default=False)
-    parser.add_argument("--convert_to_sog", action="store_true", default=False)
     parser.add_argument(
         "--manifest_timestamp",
         type=str,
@@ -385,39 +374,30 @@ def main() -> None:
         convert_flags = {
             f
             for f in sys.argv
-            if f
-            in {"--convert_to_sog", "--convert_to_splat", "--no_convert_to_splat"}
+            if f in {"--convert_to_splat", "--no_convert_to_splat"}
         }
         if convert_flags:
             convert_to_splat = args.convert_to_splat and not args.no_convert_to_splat
-            convert_to_sog = args.convert_to_sog
         else:
-            convert_to_sog = _bool_env("SPLATTER_CONVERT_TO_SOG", True)
             convert_to_splat = _bool_env("SPLATTER_CONVERT_TO_SPLAT", False)
-        if not convert_to_sog:
-            raise ValueError(
-                "local_only requires SOG conversion (product uploads are SOG-only)"
-            )
         run_local_only(
             job_root=job_root,
             scan_ids=scan_ids,
             iterations=args.iterations,
             reuse_trained=args.reuse_trained,
             convert_to_splat=convert_to_splat,
-            convert_to_sog=convert_to_sog,
         )
     else:
         use_filtered = args.use_filtered and not args.no_use_filtered
         do_partition = args.partition and not args.no_partition
         convert_flags = {
-            f for f in sys.argv
-            if f in {"--convert_to_sog", "--convert_to_splat", "--no_convert_to_splat"}
+            f
+            for f in sys.argv
+            if f in {"--convert_to_splat", "--no_convert_to_splat"}
         }
         if convert_flags:
             convert_to_splat = args.convert_to_splat and not args.no_convert_to_splat
-            convert_to_sog = args.convert_to_sog
         else:
-            convert_to_sog = _bool_env("SPLATTER_CONVERT_TO_SOG", True)
             convert_to_splat = _bool_env("SPLATTER_CONVERT_TO_SPLAT", False)
         run_global_only(
             job_root=job_root,
@@ -427,7 +407,6 @@ def main() -> None:
             partition=do_partition,
             partition_size=args.partition_size,
             convert_to_splat=convert_to_splat,
-            convert_to_sog=convert_to_sog,
             manifest_timestamp=args.manifest_timestamp,
         )
 

@@ -132,7 +132,6 @@ def scan_main(
     iterations: int = 30000,
     reuse_trained: bool = False,
     do_convert_splat: bool = False,
-    do_convert_sog: bool = False,
 ) -> None:
     start_time = time.time()
 
@@ -167,10 +166,9 @@ def scan_main(
     if not filtered_ply.exists():
         raise FileNotFoundError(f"Filtered PLY was not produced: {filtered_ply}")
 
+    convert_splat.convert_ply_to_sog(filtered_ply)
     if do_convert_splat:
         convert_splat.convert_ply_to_splat(filtered_ply)
-    if do_convert_sog:
-        convert_splat.convert_ply_to_sog(filtered_ply)
 
     end_time = time.time()
     print(f"Local splatting DONE in {end_time - start_time} seconds: {scan_id}")
@@ -182,7 +180,6 @@ def main(
     iterations: int = 30000,
     reuse_trained: bool = False,
     do_convert_splat: bool = False,
-    do_convert_sog: bool = False,
 ) -> None:
     for scan_id in scan_ids:
         scan_main(
@@ -191,7 +188,6 @@ def main(
             iterations=iterations,
             reuse_trained=reuse_trained,
             do_convert_splat=do_convert_splat,
-            do_convert_sog=do_convert_sog,
         )
 
 
@@ -206,13 +202,7 @@ if __name__ == "__main__":
         "--convert-splat",
         action="store_true",
         default=False,
-        help="Also output as .splat format",
-    )
-    parser.add_argument(
-        "--convert-sog",
-        action="store_true",
-        default=False,
-        help="Also output as .sog format",
+        help="Also write .splat alongside product SOG",
     )
 
     args = parser.parse_args()
@@ -231,5 +221,4 @@ if __name__ == "__main__":
         iterations=args.iterations,
         reuse_trained=args.reuse_trained,
         do_convert_splat=args.convert_splat,
-        do_convert_sog=args.convert_sog,
     )
