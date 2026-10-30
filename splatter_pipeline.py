@@ -356,6 +356,9 @@ def main() -> None:
     )
     parser.add_argument("--convert_to_splat", action="store_true", default=False)
     parser.add_argument("--no_convert_to_splat", action="store_true", default=False)
+    # Older image runners still pass these; SOG is always on for local/global.
+    parser.add_argument("--convert_to_sog", action="store_true", default=False, help=argparse.SUPPRESS)
+    parser.add_argument("--no_convert_to_sog", action="store_true", default=False, help=argparse.SUPPRESS)
     parser.add_argument(
         "--manifest_timestamp",
         type=str,
