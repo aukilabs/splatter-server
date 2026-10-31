@@ -18,25 +18,25 @@ Colmap keeps the v0.1 **filter → rotate → `.splat`** contract for DMT. Local
 
 ## Trainer recipe (local + colmap)
 
-Locked 2026-10-28 (LichtFeld Studio **v0.5.4.2**; Splattr preprocess; no RoMa densify; no monodepth priors; train-time Gaussian densification = stock LFS defaults):
+Locked 2026-10-31 (LichtFeld Studio **v0.5.4.2**; grocery-small S20 visual recipe + `normal_start_fraction=0.03`):
 
 Product **local** + **colmap** paths: Splattr **`preprocessing.main`** / **`preprocess` + undistort** → sparse COLMAP in `dense/` → `train_helper.sh` (no custom `--init`).
 
 | Knob | Value |
 |---|---|
 | LichtFeld pin | **v0.5.4.2** (Docker `LICHTFELD_GIT_REF`) |
-| Strategy / max_cap / bg | **`config/lichtfeld_optimization_params.json`**: `mrnf`, **`max_cap=600_000`**, **`bg_mode=random`** (no recipe env vars) |
+| Strategy / max_cap / bg | **`config/lichtfeld_optimization_params.json`**: `mrnf`, **`max_cap=1_000_000`**, **`bg_mode=random`** |
 | Export name | Helper passes LFS `--output-name splat_<iters>` (stable export stem) |
-| Iterations / resize | **50000** / **-r 2** |
+| Iterations / resize | **30000** / **-r 2** |
 | Depth prior (SSI) | **off** |
-| MoGe preprocess | **off** (helper skips); normal maps via LFS **`normal_auto_generate`** when priors on |
-| NC / flatten / prior normals | **0.01** / **0.1** / **0.1** (`normal_auto_generate=true`) |
+| MoGe preprocess | **off** (helper skips); normal maps via LFS **`normal_auto_generate`** |
+| NC / flatten / prior normals | **0.01** / **0.1** / **0.05** (`normal_auto_generate=true`) |
 | `normal_start_fraction` | **0.03** |
 | Custom dense init (`--init`) | Not used on product path; helper still accepts `--init` for manual experiments |
 | Opacity LR / reg | stock LFS **0.025** / **0.01** |
 | Scale reg / decay | stock LFS **0.01** / **0.002** |
-| `min_opacity` (train) | stock LFS **0.005** (post-filter still ~0.03) |
-| `max_screen_share` / oversize split | stock LFS **0.3** / **0.15** |
+| `min_opacity` (train) | **0.01** (post-filter still ~0.03) |
+| `max_screen_share` / oversize split | **0.2** / **0.25** |
 | Exposure | **on** (helper `--no-exposure` to disable) |
 | Train background | **`bg_mode=random`** (per-pixel noise each iter; not solid black / not modulation) |
 | Preprocess (in helper) | **none** (no MoGe / SSI depth) — prior normals from LFS auto-generate |
@@ -63,7 +63,7 @@ Recipe source of truth: **`config/lichtfeld_optimization_params.json`**. `script
 
 ## Capability: `/splatter/colmap/v1`
 
-- **Trainer**: `scripts/train_helper.sh` (config-primary; `-i` default **50000**, `-r 2`; exports `ply,sog`). Post-filter opacity prune logit `-3.5` (≈0.03).
+- **Trainer**: `scripts/train_helper.sh` (config-primary; `-i` default **30000**, `-r 2`; exports `ply,sog`). Post-filter opacity prune logit `-3.5` (≈0.03).
 - **Pipeline** (`splatter_pipeline.py` `colmap_v1_single_splat`): merged frames + global COLMAP → Splattr preprocess + undistort → same train_helper path as local (masks, cropbox) → filter → coordinate transform → **`refined/splatter/splat_rot.splat`**. Runner uploads that file only (no SOG product).
 - **Status**: Backward-compatible required output kept.
 - **Runner defaults** (override via env; local/global differ — see table above):
