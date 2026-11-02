@@ -1,6 +1,14 @@
-# splatter-server
+# Splatter Node
+This repository contains the splatter node, part of the Auki Network. This node enables photorealistic scene rendering by training 3D Gaussian Splats.
 
-Splatter compute node for the Auki Network: runs Gaussian splatting jobs (COLMAP + nerfstudio/splatfacto) as part of the reconstruction pipeline.
+The splatter node operates in conjunction with the [reconstruction node](https://github.com/aukilabs/reconstruction-server) and the scans from the Domain Management Tool (DMT) app ([App Store](https://apps.apple.com/app/domain-management-tool/id6499270503) 🔗). The refined camera poses from the reconstruction node are used as a starting point for training the gaussian splat, making it more robust to challenging indoor environments and noisy captures.
+
+For more information about the reconstruction and rendering pipeline, please refer to our [whitepaper](https://auki.gitbook.io/whitepaper/technical-overview/the-reconstruction-service).
+
+## Documentation
+- [Minimum Requirements](docs/minimum-requirements.md)
+- [Deployment](docs/deployment.md)
+- [Contributing](CONTRIBUTING.md)
 
 ## License
 
@@ -10,59 +18,12 @@ This project is licensed under the [MIT License](LICENSE).
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for how to report issues, open PRs, and run the Rust checks locally.
 
-## Docker
+## Acknowledgments
 
-### Build
-From repo root path:
-```bash
-docker build -t splatter-server .
-```
+This project builds upon the work of many excellent open-source projects, including
+[nerfstudio](https://github.com/nerfstudio-project/nerfstudio), [ply2splat](https://github.com/bastikohn/ply2splat), [PyTorch](https://pytorch.org),
+[OpenCV](https://opencv.org), [Open3D](https://www.open3d.org), and others.
 
-### Run
-
-Create a `.env` from `server/rust/.env.example` and set your DMS/DDS URLs and registration secret, then:
-
-```bash
-docker run --gpus all -p 8080:8080 --name splatter -d --env-file .env splatter-server
-```
-
-## Run Trainer
-```bash
-python3 run.py \
---domain_id {domain_id}
---job_id {job_id} \
---job_root_path {path/to/job/root} \
---log_level {log level}
-```
-
-## Required Files
-```bash
-# Input Files
-{job_root_path}
-├── datasets
-│   └── {dataset}
-│       └── Frames.mp4
-├── refined
-│   └── global
-│       └── refined_sfm_combined
-│           ├── cameras.bin
-│           ├── images.bin
-│           └── points3D.bin
-```
-## Output Files
-```bash
-# Output Files
-{job_root_path}
-├── Frames
-│   ├── {images}
-│   └── ...
-├── refined
-│   ├── nerfstudio-data
-│   │   └── {converted nerfstudio data from colmap}
-│   └── splatter
-│       ├── splat.ply
-│       ├── splat_rot.ply
-│       ├── splat_rot.splat # this is what needs to be uploaded to dmt
-│       └── splatfacto
-│           └── {splat torch model}
-```
+We thank their authors and contributors for making this work possible.  
+Please note that all third-party code and libraries are subject to their respective licenses, copyrights, and trademarks.
+We are not affiliated with, endorsed by, or sponsored by any of the projects or organizations mentioned above.

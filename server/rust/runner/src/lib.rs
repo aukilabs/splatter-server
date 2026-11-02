@@ -1,9 +1,9 @@
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
-use posemesh_compute_node::engine::RunnerRegistry;
-use posemesh_compute_node::telemetry;
-use posemesh_compute_node_runner_api as compute_runner_api;
-use posemesh_domain_http::domain_data::{download_by_id, download_metadata_v1, DownloadQuery};
+use node_host::auki_sdk::DataListQuery;
+use node_host::{
+    process, telemetry, ArtifactContent, ArtifactRequest, NodeRunner, Router, TaskContext, TaskIo,
+};
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::env;
@@ -19,9 +19,8 @@ pub const CAPABILITY_COLMAP_V1: &str = "/splatter/colmap/v1";
 pub const CAPABILITY_LOCAL_V1: &str = "/splatter/local/v1";
 pub const CAPABILITY_GLOBAL_V1: &str = "/splatter/global/v1";
 
-/// Returns a registry with all supported splatter capability runners.
-pub fn registry() -> RunnerRegistry {
-    RunnerRegistry::new()
+pub fn registry() -> Router {
+    Router::new()
         .register(SplatterRunner::new(CAPABILITY_COLMAP_V1))
         .register(SplatterRunner::new(CAPABILITY_LOCAL_V1))
         .register(SplatterRunner::new(CAPABILITY_GLOBAL_V1))
@@ -53,10 +52,10 @@ struct DownloadSummary {
 
 #[derive(Clone, Debug)]
 struct DataMeta {
-    id: String,
+    id: Uuid,
+    size: u64,
     name: String,
     data_type: String,
-    domain_id: String,
 }
 
 /// Structured progress parsed from a Python `[PROGRESS]` line.
@@ -187,35 +186,57 @@ fn global_input_name_query(raw: &str) -> Option<(String, &'static str)> {
     }
 }
 
+
+async fn download_item(io: &TaskIo, id: Uuid, size: u64, dest: &Path) -> Result<u64> {
+    let result = io.download_to(id, size, dest).await;
+    if result.is_err() {
+        let _ = tokio::fs::remove_file(dest).await;
+        if let Some(parent) = dest.parent() {
+            let _ = tokio::fs::remove_dir(parent).await;
+        }
+    }
+    result
+}
+
+const TASK_CANCELLED_PREFIX: &str = "task cancelled";
+
+fn ensure_task_not_cancelled(task: &TaskContext, stage: &str) -> Result<()> {
+    if task.is_cancelled() {
+        return Err(anyhow!("{TASK_CANCELLED_PREFIX}: {stage}"));
+    }
+    Ok(())
+}
+
+fn is_task_cancelled_error(err: &anyhow::Error) -> bool {
+    err.chain()
+        .any(|cause| cause.to_string().contains(TASK_CANCELLED_PREFIX))
+}
+
 fn is_url_cid(cid: &str) -> bool {
     cid.contains("://")
 }
 
 #[async_trait]
-impl compute_runner_api::Runner for SplatterRunner {
+impl NodeRunner for SplatterRunner {
     fn capability(&self) -> &'static str {
         self.capability
     }
 
-    async fn run(&self, ctx: compute_runner_api::TaskCtx<'_>) -> Result<()> {
-        let lease = ctx.lease;
+    async fn run(&self, task: &TaskContext, io: &TaskIo) -> Result<()> {
+        let spec = &task.task;
+        let domain_id = io.domain_id();
 
-        // Attach common task identifiers to every tracing event emitted in this task.
         let task_span = telemetry::task_span(
-            lease.task.id,
-            lease.task.job_id.unwrap_or_else(Uuid::nil),
-            &lease.task.capability,
-            lease.domain_id.unwrap_or_else(Uuid::nil),
+            spec.id,
+            spec.job_id.unwrap_or_else(Uuid::nil),
+            &spec.capability,
+            domain_id,
         );
         let _span_guard = task_span.enter();
 
-        let token = ctx.access_token.get();
-        let client_id =
-            std::env::var("POSEMESH_CLIENT_ID").unwrap_or_else(|_| "splatter-runner".into());
+        ensure_task_not_cancelled(task, "before execution")?;
         let mut refined_suffix: Option<String> = None;
-        let mut domain_base_from_input: Option<String> =
-            lease.domain_server_url.as_ref().map(|u| u.to_string());
-        let mut domain_id_from_input: Option<String> = lease.domain_id.map(|d| d.to_string());
+        let mut domain_id_from_input: Option<String> = None;
         let mode = match self.capability {
             CAPABILITY_COLMAP_V1 => CapabilityMode::ColmapV1,
             CAPABILITY_LOCAL_V1 => CapabilityMode::LocalV1,
@@ -225,18 +246,18 @@ impl compute_runner_api::Runner for SplatterRunner {
         // Resolve task workspace root; default is relative "tasks" for local dev,
         // but Docker image sets TASKS_ROOT=/app/tasks to avoid cwd/permission issues.
         let task_root = env::var("TASKS_ROOT").unwrap_or_else(|_| "tasks".to_string());
-        let job_root = PathBuf::from(task_root).join(lease.task.id.to_string());
+        let job_root = PathBuf::from(task_root).join(spec.id.to_string());
         tokio::fs::create_dir_all(&job_root)
             .await
             .with_context(|| format!("create job root {}", job_root.display()))?;
         let datasets_dir = job_root.join("datasets");
 
         let task_result: Result<()> = async {
-            ctx.ctrl.progress(json!({ "status": "started" })).await?;
+            task.progress(json!({ "status": "started" }))?;
 
             // Materialize all input CIDs. Older /splatter/colmap/v1 jobs can provide
             // multiple input CIDs, so preserve that behavior for compatibility.
-            let input_cids = lease.task.inputs_cids.clone();
+            let input_cids = spec.inputs_cids.clone();
             info!(?input_cids, "input cids");
             let mut summary = DownloadSummary::default();
 
@@ -258,30 +279,12 @@ impl compute_runner_api::Runner for SplatterRunner {
                     let Some((query_name, data_type)) = global_input_name_query(&cid) else {
                         return Err(anyhow!("unsupported named input cid {}", cid));
                     };
-                    let (Some(domain_base_raw), Some(domain_id)) = (
-                        domain_base_from_input.as_deref(),
-                        domain_id_from_input.as_deref(),
-                    ) else {
-                        return Err(anyhow!(
-                            "cannot resolve named input cid {}: domain routing unknown",
-                            cid
-                        ));
-                    };
-                    let domain_base = domain_base_raw.trim_end_matches('/').to_string();
-                    let query = DownloadQuery {
-                        ids: vec![],
-                        name: Some(query_name.clone()),
-                        data_type: Some(data_type.to_string()),
-                    };
-                    let meta_list = download_metadata_v1(
-                        &domain_base,
-                        &client_id,
-                        &token,
-                        domain_id,
-                        &query,
-                    )
-                    .await
-                    .with_context(|| format!("resolve named input cid {}", cid))?;
+                    ensure_task_not_cancelled(task, "resolving named input")?;
+                    let meta_list = io
+                        .find(&query_name, Some(data_type))
+                        .await
+                        .map_err(|e| anyhow!(e))
+                        .with_context(|| format!("resolve named input cid {}", cid))?;
                     let Some(meta) = meta_list.into_iter().next() else {
                         return Err(anyhow!(
                             "named input cid {} resolved empty (name={} type={})",
@@ -305,15 +308,13 @@ impl compute_runner_api::Runner for SplatterRunner {
                         mode,
                         &[DataMeta {
                             id: meta.id,
+                            size: meta.size,
                             name: meta.name,
                             data_type: meta.data_type,
-                            domain_id: meta.domain_id,
                         }],
-                        &domain_base,
-                        &client_id,
-                        &token,
                         &job_root,
-                        &ctx,
+                        task,
+                        io,
                     )
                     .await
                     .with_context(|| format!("materialize named input cid {}", cid))?;
@@ -326,10 +327,7 @@ impl compute_runner_api::Runner for SplatterRunner {
                     continue;
                 }
 
-                let materialized = ctx
-                    .input
-                    .materialize_cid_with_meta(&cid)
-                    .await
+                let materialized = io.materialize(&cid).await
                     .with_context(|| format!("materialize cid {}", cid))?;
 
             // Print metadata returned with the CID.
@@ -344,14 +342,12 @@ impl compute_runner_api::Runner for SplatterRunner {
                 "extracted_paths": materialized.extracted_paths,
             });
             info!(%cid, metadata = %metadata_json, "input cid metadata");
-            ctx.ctrl
-                .log_event(json!({
+            let _ = task.log_event(json!({
                     "level": "info",
                     "message": "input cid metadata",
                     "cid": cid.as_str(),
                     "metadata": metadata_json
-                }))
-                .await?;
+                }));
 
             if refined_suffix.is_none() {
                 refined_suffix = extract_refined_suffix(materialized.name.as_deref());
@@ -360,8 +356,7 @@ impl compute_runner_api::Runner for SplatterRunner {
             // Always prefer CID-derived domain routing for data metadata/download calls.
             // Lease-provided domain URL/ID can differ in some environments and cause
             // "route not found" on domain-data endpoints.
-            if let Some((base, dom_id)) = parse_domain_from_cid(&cid) {
-                domain_base_from_input = Some(base);
+            if let Some((_base, dom_id)) = parse_domain_from_cid(&cid) {
                 domain_id_from_input = Some(dom_id);
             }
 
@@ -397,15 +392,13 @@ impl compute_runner_api::Runner for SplatterRunner {
                         if !summary.scan_ids.contains(&scan_id) {
                             summary.scan_ids.push(scan_id.clone());
                         }
-                        ctx.ctrl
-                            .log_event(json!({
+                        let _ = task.log_event(json!({
                                 "level": "info",
                                 "message": "materialized direct dataset input",
                                 "cid": cid.as_str(),
                                 "scan_id": scan_id,
                                 "path": copied_path.display().to_string(),
-                            }))
-                            .await?;
+                            }));
                     }
                     continue;
                 }
@@ -422,14 +415,12 @@ impl compute_runner_api::Runner for SplatterRunner {
                 _ => Vec::new(),
             };
             info!(%cid, dataIDs = %data_ids, "parsed input dataIDs");
-            ctx.ctrl
-                .log_event(json!({
+            let _ = task.log_event(json!({
                     "level": "info",
                     "message": "parsed input json dataIDs",
                     "cid": cid.as_str(),
                     "dataIDs": data_ids
-                }))
-                .await?;
+                }));
 
             // Global expects the refined manifest at
             // job_root/refined/global/refined_manifest.json. When the task input
@@ -460,42 +451,30 @@ impl compute_runner_api::Runner for SplatterRunner {
                         name = ?materialized.name,
                         "staged refined manifest from input cid"
                     );
-                    ctx.ctrl
-                        .log_event(json!({
+                    task.log_event(json!({
                             "level": "info",
                             "message": "staged refined manifest from input cid",
                             "dest": dest.display().to_string(),
                             "name": materialized.name,
-                        }))
-                        .await?;
+                        }));
                 }
             }
 
             if !data_id_list.is_empty() {
-                if let (Some(domain_base_raw), Some(domain_id)) = (
-                    domain_base_from_input.as_deref(),
-                    domain_id_from_input.as_deref(),
-                ) {
-                    let domain_base = domain_base_raw.trim_end_matches('/').to_string();
-
-                    // Try single-ID requests to avoid oversized query strings.
+                    ensure_task_not_cancelled(task, "resolving dataset metadata")?;
                     let chunk_size = 50;
                     let mut all_metadata = Vec::new();
+                    let id_list: Vec<Uuid> = data_id_list
+                        .iter()
+                        .filter_map(|raw| Uuid::parse_str(raw.trim()).ok())
+                        .collect();
                     let mut downloaded_recordings: HashSet<String> = HashSet::new();
-                    for chunk in data_id_list.chunks(chunk_size) {
-                        let query = DownloadQuery {
+                    for chunk in id_list.chunks(chunk_size) {
+                        let query = DataListQuery {
                             ids: chunk.to_vec(),
-                            name: None,
-                            data_type: None,
+                            ..Default::default()
                         };
-                        match download_metadata_v1(
-                            &domain_base,
-                            &client_id,
-                            &token,
-                            domain_id,
-                            &query,
-                        )
-                        .await
+                        match io.list(&query).await.map_err(|e| anyhow!(e))
                         {
                             Ok(metadata) => {
                                 if metadata.is_empty() {
@@ -510,60 +489,46 @@ impl compute_runner_api::Runner for SplatterRunner {
                                         if downloaded_recordings.contains(&m.name) {
                                             continue;
                                         }
-                                        let data_id = m.id.clone();
-                                        let domain_id_for_download = m.domain_id.clone();
                                         let folder_name = m
                                             .name
                                             .strip_prefix("dmt_recording_")
                                             .unwrap_or(m.name.as_str())
                                             .to_string();
                                         let folder_name = if folder_name.is_empty() {
-                                            data_id.clone()
+                                            m.id.to_string()
                                         } else {
                                             folder_name
                                         };
-                                        match download_by_id(
-                                            &domain_base,
-                                            &client_id,
-                                            &token,
-                                            &domain_id_for_download,
-                                            &data_id,
-                                        )
-                                        .await
+                                        let dest_dir = datasets_dir.join(&folder_name);
+                                        let dest_path = dest_dir.join("Frames.mp4");
+                                        match download_item(io, m.id, m.size, &dest_path).await
                                         {
                                             Ok(bytes) => {
-                                                let dest_dir = datasets_dir.join(&folder_name);
                                                 tokio::fs::create_dir_all(&dest_dir).await?;
-                                                let dest_path = dest_dir.join("Frames.mp4");
-                                                tokio::fs::write(&dest_path, &bytes).await?;
                                                 summary.datasets_downloaded += 1;
                                                 downloaded_recordings.insert(m.name.clone());
                                                 if !summary.scan_ids.contains(&folder_name) {
                                                     summary.scan_ids.push(folder_name.clone());
                                                 }
 
-                                                ctx.ctrl
-                                                    .log_event(json!({
+                                                let _ = task.log_event(json!({
                                                         "level": "info",
                                                         "message": "downloaded dmt recording",
-                                                        "data_id": data_id,
+                                                        "data_id": m.id.to_string(),
                                                         "folder": folder_name,
-                                                        "bytes": bytes.len(),
+                                                        "bytes": bytes,
                                                         "dest": dest_path.display().to_string(),
-                                                    }))
-                                                    .await?;
+                                                    }));
                                             }
                                             Err(err) => {
-                                                ctx.ctrl
-                                                    .log_event(json!({
+                                                let _ = task.log_event(json!({
                                                         "level": "warn",
                                                         "message": "failed to download dmt recording",
-                                                        "data_id": data_id,
+                                                        "data_id": m.id.to_string(),
                                                         "error": err.to_string(),
-                                                    }))
-                                                    .await?;
+                                                    }));
                                                 warn!(
-                                                    data_id = %data_id,
+                                                    data_id = %m.id,
                                                     error = %err,
                                                     "failed to download dmt recording"
                                                 );
@@ -579,9 +544,9 @@ impl compute_runner_api::Runner for SplatterRunner {
                                     );
                                     all_metadata.push(DataMeta {
                                         id: m.id,
+                                        size: m.size,
                                         name: m.name,
                                         data_type: m.data_type,
-                                        domain_id: m.domain_id,
                                     });
                                 }
                             }
@@ -618,60 +583,39 @@ impl compute_runner_api::Runner for SplatterRunner {
                             if downloaded_recordings.contains(&candidate_name) {
                                 break;
                             }
-                            let query = DownloadQuery {
-                                ids: vec![],
-                                name: Some(candidate_name.clone()),
-                                data_type: Some("dmt_recording_mp4".to_string()),
-                            };
-                            match download_metadata_v1(
-                                &domain_base,
-                                &client_id,
-                                &token,
-                                domain_id,
-                                &query,
-                            )
-                            .await
+                            match io
+                                .find(&candidate_name, Some("dmt_recording_mp4"))
+                                .await
+                                .map_err(|e| anyhow!(e))
                             {
                                 Ok(meta_list) => {
                                     if let Some(meta) = meta_list.into_iter().next() {
-                                        let data_id = meta.id.clone();
-                                        let domain_id_for_download = meta.domain_id.clone();
                                         let folder_name = scan_id.clone();
-                                        match download_by_id(
-                                            &domain_base,
-                                            &client_id,
-                                            &token,
-                                            &domain_id_for_download,
-                                            &data_id,
-                                        )
-                                        .await
+                                        let dest_dir = datasets_dir.join(&folder_name);
+                                        let dest_path = dest_dir.join("Frames.mp4");
+                                        match download_item(io, meta.id, meta.size, &dest_path).await
                                         {
                                             Ok(bytes) => {
-                                                let dest_dir = datasets_dir.join(&folder_name);
                                                 tokio::fs::create_dir_all(&dest_dir).await?;
-                                                let dest_path = dest_dir.join("Frames.mp4");
-                                                tokio::fs::write(&dest_path, &bytes).await?;
                                                 summary.datasets_downloaded += 1;
                                                 downloaded_recordings.insert(candidate_name.clone());
                                                 if !summary.scan_ids.contains(&folder_name) {
                                                     summary.scan_ids.push(folder_name.clone());
                                                 }
-                                                ctx.ctrl
-                                                    .log_event(json!({
+                                                let _ = task.log_event(json!({
                                                         "level": "info",
                                                         "message": "downloaded derived dmt recording",
-                                                        "data_id": data_id,
+                                                        "data_id": meta.id.to_string(),
                                                         "folder": folder_name,
-                                                        "bytes": bytes.len(),
+                                                        "bytes": bytes,
                                                         "dest": dest_path.display().to_string(),
                                                         "name_query": candidate_name,
-                                                    }))
-                                                    .await?;
+                                                    }));
                                                 break;
                                             }
                                             Err(err) => {
                                                 warn!(
-                                                    data_id = %data_id,
+                                                    data_id = %meta.id,
                                                     scan_id = %scan_id,
                                                     error = %err,
                                                     "failed to download derived dmt recording"
@@ -702,58 +646,34 @@ impl compute_runner_api::Runner for SplatterRunner {
                                 downloaded_refined_zips.insert(scan_id.clone());
                             } else {
                                 let refined_name = format!("refined_scan_{scan_id}");
-                                let query = DownloadQuery {
-                                    ids: vec![],
-                                    name: Some(refined_name.clone()),
-                                    data_type: Some("refined_scan_zip".to_string()),
-                                };
-                                match download_metadata_v1(
-                                    &domain_base,
-                                    &client_id,
-                                    &token,
-                                    domain_id,
-                                    &query,
-                                )
-                                .await
+                                match io
+                                    .find(&refined_name, Some("refined_scan_zip"))
+                                    .await
+                                    .map_err(|e| anyhow!(e))
                                 {
                                     Ok(meta_list) => {
                                         if let Some(meta) = meta_list.into_iter().next() {
-                                            let data_id = meta.id.clone();
-                                            let domain_id_for_download = meta.domain_id.clone();
-                                            match download_by_id(
-                                                &domain_base,
-                                                &client_id,
-                                                &token,
-                                                &domain_id_for_download,
-                                                &data_id,
-                                            )
-                                            .await
+                                            match download_item(io, meta.id, meta.size, &dest_path).await
                                             {
                                                 Ok(bytes) => {
-                                                    if let Some(parent) = dest_path.parent() {
-                                                        tokio::fs::create_dir_all(parent).await?;
-                                                    }
-                                                    tokio::fs::write(&dest_path, &bytes).await?;
                                                     summary.datasets_downloaded += 1;
                                                     downloaded_refined_zips.insert(scan_id.clone());
                                                     if !summary.scan_ids.contains(&scan_id) {
                                                         summary.scan_ids.push(scan_id.clone());
                                                     }
-                                                    ctx.ctrl
-                                                        .log_event(json!({
+                                                    let _ = task.log_event(json!({
                                                             "level": "info",
                                                             "message": "downloaded derived refined scan zip",
-                                                            "data_id": data_id,
+                                                            "data_id": meta.id.to_string(),
                                                             "scan_id": scan_id,
-                                                            "bytes": bytes.len(),
+                                                            "bytes": bytes,
                                                             "dest": dest_path.display().to_string(),
                                                             "name_query": refined_name,
-                                                        }))
-                                                        .await?;
+                                                        }));
                                                 }
                                                 Err(err) => {
                                                     warn!(
-                                                        data_id = %data_id,
+                                                        data_id = %meta.id,
                                                         scan_id = %scan_id,
                                                         error = %err,
                                                         "failed to download derived refined scan zip"
@@ -793,19 +713,10 @@ impl compute_runner_api::Runner for SplatterRunner {
                             {
                                 continue;
                             }
-                            let query = DownloadQuery {
-                                ids: vec![],
-                                name: Some(query_name.clone()),
-                                data_type: Some(data_type.to_string()),
-                            };
-                            match download_metadata_v1(
-                                &domain_base,
-                                &client_id,
-                                &token,
-                                domain_id,
-                                &query,
-                            )
-                            .await
+                            match io
+                                .find(&query_name, Some(data_type))
+                                .await
+                                .map_err(|e| anyhow!(e))
                             {
                                 Ok(meta_list) => {
                                     if let Some(meta) = meta_list.into_iter().next() {
@@ -817,8 +728,7 @@ impl compute_runner_api::Runner for SplatterRunner {
                                             raw = %raw,
                                             "resolved global input by name"
                                         );
-                                        ctx.ctrl
-                                            .log_event(json!({
+                                        let _ = task.log_event(json!({
                                                 "level": "info",
                                                 "message": "resolved global input by name",
                                                 "data_id": meta.id,
@@ -826,17 +736,16 @@ impl compute_runner_api::Runner for SplatterRunner {
                                                 "data_type": meta.data_type,
                                                 "name_query": query_name,
                                                 "raw": raw,
-                                            }))
-                                            .await?;
+                                            }));
                                         if refined_suffix.is_none() {
                                             refined_suffix =
                                                 extract_refined_suffix(Some(&meta.name));
                                         }
                                         all_metadata.push(DataMeta {
                                             id: meta.id,
+                                            size: meta.size,
                                             name: meta.name,
                                             data_type: meta.data_type,
-                                            domain_id: meta.domain_id,
                                         });
                                     } else {
                                         warn!(
@@ -872,11 +781,9 @@ impl compute_runner_api::Runner for SplatterRunner {
                     let partial = materialize_inputs_for_mode(
                         mode,
                         &all_metadata,
-                        &domain_base,
-                        &client_id,
-                        &token,
                         &job_root,
-                        &ctx,
+                        task,
+                        io,
                     )
                     .await?;
                     summary.datasets_downloaded += partial.datasets_downloaded;
@@ -889,20 +796,14 @@ impl compute_runner_api::Runner for SplatterRunner {
                     if mode == CapabilityMode::ColmapV1 {
                         materialize_colmap_binaries(
                             refined_suffix.as_deref(),
-                            domain_base_from_input.as_deref(),
-                            domain_id_from_input.as_deref(),
-                            &client_id,
-                            &token,
                             &job_root,
-                            &ctx,
+                            task,
+                            io,
                         )
                         .await?;
                     }
-                } else {
-                    warn!(%cid, "could not resolve domain info from cid or lease");
                 }
             }
-        }
 
         // Keep backward compatibility for /splatter/colmap/v1: historically this
         // capability proceeded without this strict preflight and relied on pipeline-level
@@ -922,21 +823,10 @@ impl compute_runner_api::Runner for SplatterRunner {
                 ));
             }
         }
-
         // Run the Python pipeline and upload the splat.
-            let Some(domain_id_str) = lease
-                .domain_id
-                .map(|d| d.to_string())
-                .or(domain_id_from_input.clone())
-            else {
-                return Err(anyhow!(
-                    "domain_id missing (task domain_id and input cid domain_id were None)"
-                ));
-            };
-
-        let job_id_str = lease.task.job_id.map(|j| j.to_string()).unwrap_or_else(|| {
+        let job_id_str = spec.job_id.map(|j| j.to_string()).unwrap_or_else(|| {
             // Fallback to task id so the script always has a value.
-            lease.task.id.to_string()
+            spec.id.to_string()
         });
 
         // Resolve scripts at runtime so container layout is flexible.
@@ -1002,13 +892,11 @@ impl compute_runner_api::Runner for SplatterRunner {
             }
         }
 
-        ctx.ctrl
-            .progress(json!({
+        task.progress(json!({
                 "status": "running_python",
                 "job_root_path": job_root,
                 "capability": self.capability
-            }))
-            .await?;
+            }))?;
 
         let full_cmd: Vec<String> = std::iter::once("python".to_string())
             .chain(cmd_args.iter().cloned())
@@ -1019,18 +907,21 @@ impl compute_runner_api::Runner for SplatterRunner {
             path_env = ?env::var("PATH").unwrap_or_else(|_| "<unset>".into()),
             "spawning python pipeline"
         );
-        ctx.ctrl
-            .log_event(json!({
+        let _ = task.log_event(json!({
                 "level": "info",
                 "message": "spawning python command",
                 "command": full_cmd,
                 "cwd": project_root.display().to_string(),
-            }))
-            .await?;
+            }));
 
+        ensure_task_not_cancelled(task, "before python start")?;
         let cmd_for_error = full_cmd.join(" ");
-        let mut child = Command::new("python")
-            .args(cmd_args.drain(..))
+        let mut command = Command::new("python3");
+        process::isolate(&mut command);
+        for arg in &cmd_args {
+            command.arg(arg);
+        }
+        let mut child = command
             .env("PYTHONUNBUFFERED", "1")
             .current_dir(&project_root)
             .stdout(Stdio::piped())
@@ -1057,7 +948,7 @@ impl compute_runner_api::Runner for SplatterRunner {
         let mut stderr_reader = BufReader::new(stderr).lines();
         let mut tail: VecDeque<String> = VecDeque::with_capacity(200);
         let mut heartbeat_interval = tokio::time::interval(std::time::Duration::from_secs(30));
-        heartbeat_interval.tick().await; // consume the immediate first tick
+        heartbeat_interval.tick(); // consume the immediate first tick
 
         let mut last_stage = String::from("starting");
         let mut last_pct: u8 = 0;
@@ -1067,8 +958,13 @@ impl compute_runner_api::Runner for SplatterRunner {
 
         let mut stdout_done = false;
         let mut stderr_done = false;
+        let cancellation = task.cancellation();
         while !stdout_done || !stderr_done {
             tokio::select! {
+                _ = cancellation.cancelled() => {
+                    process::terminate_group(&mut child, process::TERMINATE_GRACE).await;
+                    return Err(anyhow!("{TASK_CANCELLED_PREFIX}: python execution"));
+                }
                 line = stdout_reader.next_line(), if !stdout_done => {
                     match line {
                         Ok(Some(l)) => {
@@ -1094,14 +990,14 @@ impl compute_runner_api::Runner for SplatterRunner {
                                     || last_progress_send.elapsed() >= TRAINING_PROGRESS_MIN_INTERVAL;
                                 if should_send {
                                     last_progress_send = Instant::now();
-                                    let _ = ctx.ctrl.progress(json!({
+                                    let _ = task.progress(json!({
                                         "status": "processing",
                                         "capability": self.capability,
                                         "stage": last_stage,
                                         "pct": last_pct,
                                         "detail": last_detail,
                                         "elapsed_s": start.elapsed().as_secs(),
-                                    })).await;
+                                    }));
                                 }
                             } else if let Some((cur, total, loss)) = parse_training_progress(&l) {
                                 let train_frac = if total > 0 { cur as f64 / total as f64 } else { 0.0 };
@@ -1110,7 +1006,7 @@ impl compute_runner_api::Runner for SplatterRunner {
                                 last_detail = format!("{cur}/{total} loss={loss:.4}");
                                 if last_progress_send.elapsed() >= TRAINING_PROGRESS_MIN_INTERVAL {
                                     last_progress_send = Instant::now();
-                                    let _ = ctx.ctrl.progress(json!({
+                                    let _ = task.progress(json!({
                                         "status": "processing",
                                         "capability": self.capability,
                                         "stage": "training",
@@ -1119,14 +1015,14 @@ impl compute_runner_api::Runner for SplatterRunner {
                                         "iter_total": total,
                                         "loss": loss,
                                         "elapsed_s": start.elapsed().as_secs(),
-                                    })).await;
+                                    }));
                                 }
                             } else {
-                                let _ = ctx.ctrl.log_event(json!({
+                                let _ = task.log_event(json!({
                                     "level": "info",
                                     "message": l,
                                     "source": "python_stdout"
-                                })).await;
+                                }));
                             }
                         }
                         Ok(None) => stdout_done = true,
@@ -1142,11 +1038,11 @@ impl compute_runner_api::Runner for SplatterRunner {
                             if tail.len() == 200 { tail.pop_front(); }
                             tail.push_back(format!("stderr: {l}"));
                             warn!(line = %l, "python stderr");
-                            let _ = ctx.ctrl.log_event(json!({
+                            let _ = task.log_event(json!({
                                 "level": "warn",
                                 "message": l,
                                 "source": "python_stderr"
-                            })).await;
+                            }));
                         }
                         Ok(None) => stderr_done = true,
                         Err(err) => {
@@ -1157,14 +1053,14 @@ impl compute_runner_api::Runner for SplatterRunner {
                 }
                 _ = heartbeat_interval.tick() => {
                     let elapsed = start.elapsed();
-                    let _ = ctx.ctrl.progress(json!({
+                    let _ = task.progress(json!({
                         "status": "processing",
                         "capability": self.capability,
                         "stage": last_stage,
                         "pct": last_pct,
                         "detail": last_detail,
                         "elapsed_s": elapsed.as_secs(),
-                    })).await;
+                    }));
                 }
             }
         }
@@ -1174,34 +1070,31 @@ impl compute_runner_api::Runner for SplatterRunner {
 
         if !status.success() {
             let summary_tail: Vec<String> = tail.into_iter().collect();
-            ctx.ctrl
-                .log_event(json!({
+            let _ = task.log_event(json!({
                     "level": "error",
                     "message": "python job failed",
                     "status": status.code(),
                     "duration_ms": duration.as_millis(),
                     "tail": summary_tail,
-                }))
-                .await?;
+                }));
             return Err(anyhow!(
                 "python job failed: status={:?}",
                 status.code()
             ));
         }
 
-            ctx.ctrl
-                .log_event(json!({
+            let _ = task.log_event(json!({
                     "level": "info",
                     "message": "python job completed",
                     "status": status.code(),
                     "duration_ms": duration.as_millis(),
-                }))
-                .await?;
+                }));
 
         match mode {
             CapabilityMode::ColmapV1 => {
                 upload_colmap_result(
-                    &ctx,
+                    task,
+                    io,
                     &job_root,
                     refined_suffix.as_deref(),
                     bool_env("SPLATTER_UPLOAD_DEBUG_ARTIFACTS", false),
@@ -1209,20 +1102,38 @@ impl compute_runner_api::Runner for SplatterRunner {
                 .await?;
             }
             CapabilityMode::LocalV1 | CapabilityMode::GlobalV1 => {
-                upload_staged_outputs(&ctx, &job_root).await?;
+                upload_staged_outputs(task, io, &job_root).await?;
             }
         }
 
-            ctx.ctrl
-                .progress(json!({
+            task.progress(json!({
                     "status": "finished",
                     "capability": self.capability
-                }))
-                .await?;
+                }))?;
 
             Ok(())
         }
         .await;
+
+        if let Err(err) = &task_result {
+            if is_task_cancelled_error(err) {
+                let _ = task.progress(json!({
+                    "stage": "cancelled",
+                    "status": "cancelled",
+                }));
+                let _ = task.log_event(json!({
+                    "level": "warn",
+                    "stage": "cancelled",
+                    "message": err.to_string(),
+                }));
+            } else {
+                let _ = task.log_event(json!({
+                    "level": "error",
+                    "stage": "runner",
+                    "message": err.to_string(),
+                }));
+            }
+        }
 
         if !tasks_cleanup_disabled() {
             // Best-effort cleanup of this task workspace to avoid disk growth.
@@ -1262,30 +1173,13 @@ fn normalize_scan_id(raw: &str) -> String {
     base.to_string()
 }
 
-async fn download_to(
-    domain_base: &str,
-    client_id: &str,
-    token: &str,
-    domain_id: &str,
-    data_id: &str,
-    dest_path: &Path,
-) -> Result<usize> {
-    let bytes = download_by_id(domain_base, client_id, token, domain_id, data_id).await?;
-    if let Some(parent) = dest_path.parent() {
-        tokio::fs::create_dir_all(parent).await?;
-    }
-    tokio::fs::write(dest_path, &bytes).await?;
-    Ok(bytes.len())
-}
 
 async fn materialize_inputs_for_mode(
     mode: CapabilityMode,
     metadata: &[DataMeta],
-    domain_base: &str,
-    client_id: &str,
-    token: &str,
     job_root: &Path,
-    ctx: &compute_runner_api::TaskCtx<'_>,
+    task: &TaskContext,
+    io: &TaskIo,
 ) -> Result<DownloadSummary> {
     let mut summary = DownloadSummary::default();
     let mut scan_set: HashSet<String> = HashSet::new();
@@ -1297,19 +1191,17 @@ async fn materialize_inputs_for_mode(
                 if is_recording_input(data_type, &m.name) {
                     let scan_id = normalize_scan_id(m.name.trim_start_matches("dmt_recording_"));
                     let dest = job_root.join("datasets").join(&scan_id).join("Frames.mp4");
-                    let bytes = download_to(domain_base, client_id, token, &m.domain_id, &m.id, &dest).await?;
+                    let bytes = download_item(io, m.id, m.size, &dest).await?;
                     summary.datasets_downloaded += 1;
                     scan_set.insert(scan_id.clone());
-                    ctx.ctrl
-                        .log_event(json!({
+                    task.log_event(json!({
                             "level": "info",
                             "message": "downloaded dmt recording",
-                            "data_id": m.id.as_str(),
+                            "data_id": m.id.to_string(),
                             "scan_id": scan_id,
                             "bytes": bytes,
                             "dest": dest.display().to_string(),
-                        }))
-                        .await?;
+                        }));
                     continue;
                 }
                 if mode == CapabilityMode::LocalV1
@@ -1317,19 +1209,17 @@ async fn materialize_inputs_for_mode(
                 {
                     let scan_id = normalize_scan_id(m.name.trim_start_matches("refined_scan_"));
                     let dest = job_root.join("datasets").join(&scan_id).join("RefinedScan.zip");
-                    let bytes = download_to(domain_base, client_id, token, &m.domain_id, &m.id, &dest).await?;
+                    let bytes = download_item(io, m.id, m.size, &dest).await?;
                     summary.datasets_downloaded += 1;
                     scan_set.insert(scan_id.clone());
-                    ctx.ctrl
-                        .log_event(json!({
+                    let _ = task.log_event(json!({
                             "level": "info",
                             "message": "downloaded refined scan zip",
-                            "data_id": m.id.as_str(),
+                            "data_id": m.id.to_string(),
                             "scan_id": scan_id,
                             "bytes": bytes,
                             "dest": dest.display().to_string(),
-                        }))
-                        .await?;
+                        }));
                 }
             }
             CapabilityMode::GlobalV1 => {
@@ -1343,21 +1233,19 @@ async fn materialize_inputs_for_mode(
                         .join(&scan_id)
                         .join("splat")
                         .join(sog_name);
-                    let bytes = download_to(domain_base, client_id, token, &m.domain_id, &m.id, &dest).await?;
+                    let bytes = download_item(io, m.id, m.size, &dest).await?;
                     let dataset_dir = job_root.join("datasets").join(&scan_id);
                     tokio::fs::create_dir_all(&dataset_dir).await?;
                     summary.datasets_downloaded += 1;
                     scan_set.insert(scan_id.clone());
-                    ctx.ctrl
-                        .log_event(json!({
+                    let _ = task.log_event(json!({
                             "level": "info",
                             "message": "downloaded local splat sog",
-                            "data_id": m.id.as_str(),
+                            "data_id": m.id.to_string(),
                             "scan_id": scan_id,
                             "bytes": bytes,
                             "dest": dest.display().to_string(),
-                        }))
-                        .await?;
+                        }));
                     continue;
                 }
                 if data_type == "local_splat_ply" || m.name.starts_with("local_splat_ply_") {
@@ -1369,21 +1257,19 @@ async fn materialize_inputs_for_mode(
                         .join(&scan_id)
                         .join("splat")
                         .join(ply_name);
-                    let bytes = download_to(domain_base, client_id, token, &m.domain_id, &m.id, &dest).await?;
+                    let bytes = download_item(io, m.id, m.size, &dest).await?;
                     let dataset_dir = job_root.join("datasets").join(&scan_id);
                     tokio::fs::create_dir_all(&dataset_dir).await?;
                     summary.datasets_downloaded += 1;
                     scan_set.insert(scan_id.clone());
-                    ctx.ctrl
-                        .log_event(json!({
+                    let _ = task.log_event(json!({
                             "level": "info",
                             "message": "downloaded local splat ply (legacy)",
-                            "data_id": m.id.as_str(),
+                            "data_id": m.id.to_string(),
                             "scan_id": scan_id,
                             "bytes": bytes,
                             "dest": dest.display().to_string(),
-                        }))
-                        .await?;
+                        }));
                     continue;
                 }
                 if data_type == "refined_manifest_json" || m.name.starts_with("refined_manifest") {
@@ -1391,16 +1277,14 @@ async fn materialize_inputs_for_mode(
                         .join("refined")
                         .join("global")
                         .join("refined_manifest.json");
-                    let bytes = download_to(domain_base, client_id, token, &m.domain_id, &m.id, &dest).await?;
-                    ctx.ctrl
-                        .log_event(json!({
+                    let bytes = download_item(io, m.id, m.size, &dest).await?;
+                    let _ = task.log_event(json!({
                             "level": "info",
                             "message": "downloaded refined manifest",
-                            "data_id": m.id.as_str(),
+                            "data_id": m.id.to_string(),
                             "bytes": bytes,
                             "dest": dest.display().to_string(),
-                        }))
-                        .await?;
+                        }));
                 }
             }
         }
@@ -1500,19 +1384,14 @@ async fn try_materialize_dataset_from_input(
 
 async fn materialize_colmap_binaries(
     refined_suffix: Option<&str>,
-    domain_base: Option<&str>,
-    domain_id: Option<&str>,
-    client_id: &str,
-    token: &str,
     job_root: &Path,
-    ctx: &compute_runner_api::TaskCtx<'_>,
+    task: &TaskContext,
+    io: &TaskIo,
 ) -> Result<()> {
     let Some(suffix) = refined_suffix else {
         warn!("refined suffix missing; skipping colmap binary materialization");
         return Ok(());
     };
-    let Some(domain_base) = domain_base else { return Ok(()); };
-    let Some(domain_id) = domain_id else { return Ok(()); };
 
     let expected_colmap = [
         ("colmap_frames_bin", "frames.bin"),
@@ -1522,16 +1401,12 @@ async fn materialize_colmap_binaries(
         ("colmap_rigs_bin", "rigs.bin"),
     ];
 
-    let mut colmap_refs: HashMap<String, (String, String)> = HashMap::new();
+    let mut colmap_refs: HashMap<String, (Uuid, u64)> = HashMap::new();
     let mut missing: Vec<&str> = Vec::new();
     for (prefix, _) in expected_colmap {
+        ensure_task_not_cancelled(task, "resolving colmap metadata")?;
         let expected_name = format!("{prefix}{suffix}");
-        let query = DownloadQuery {
-            ids: vec![],
-            name: Some(expected_name.clone()),
-            data_type: None,
-        };
-        match download_metadata_v1(domain_base, client_id, token, domain_id, &query).await {
+        match io.find(&expected_name, None).await {
             Ok(meta_list) => {
                 if let Some(meta) = meta_list.into_iter().next() {
                     info!(
@@ -1539,7 +1414,7 @@ async fn materialize_colmap_binaries(
                         data_id = %meta.id,
                         "found colmap metadata"
                     );
-                    colmap_refs.insert(prefix.to_string(), (meta.id, meta.domain_id.clone()));
+                    colmap_refs.insert(prefix.to_string(), (meta.id, meta.size));
                 } else {
                     missing.push(prefix);
                     warn!(name = %expected_name, "colmap metadata missing");
@@ -1564,39 +1439,32 @@ async fn materialize_colmap_binaries(
         tokio::fs::create_dir_all(&dest_dir).await?;
 
         for (prefix, target_name) in expected_colmap {
-            if let Some((data_id, domain_id_for_download)) = colmap_refs.get(prefix) {
-                match download_by_id(domain_base, client_id, token, domain_id_for_download, data_id).await
-                {
+            if let Some((data_id, size)) = colmap_refs.get(prefix) {
+                ensure_task_not_cancelled(task, "downloading colmap binary")?;
+                let dest_path = dest_dir.join(target_name);
+                match download_item(io, *data_id, *size, &dest_path).await {
                     Ok(bytes) => {
-                        let dest_path = dest_dir.join(target_name);
-                        tokio::fs::write(&dest_path, &bytes).await?;
-
-                        ctx.ctrl
-                            .log_event(json!({
-                                "level": "info",
-                                "message": "downloaded colmap binary",
-                                "data_id": data_id,
-                                "bytes": bytes.len(),
-                                "dest": dest_path.display().to_string(),
-                            }))
-                            .await?;
-
+                        let _ = task.log_event(json!({
+                            "level": "info",
+                            "message": "downloaded colmap binary",
+                            "data_id": data_id.to_string(),
+                            "bytes": bytes,
+                            "dest": dest_path.display().to_string(),
+                        }));
                         info!(
                             name = %prefix,
-                            bytes = bytes.len(),
+                            bytes = bytes,
                             dest = %dest_path.display(),
                             "downloaded colmap binary"
                         );
                     }
                     Err(err) => {
-                        ctx.ctrl
-                            .log_event(json!({
-                                "level": "error",
-                                "message": "failed to download colmap binary",
-                                "data_id": data_id,
-                                "error": err.to_string(),
-                            }))
-                            .await?;
+                        let _ = task.log_event(json!({
+                            "level": "error",
+                            "message": "failed to download colmap binary",
+                            "data_id": data_id.to_string(),
+                            "error": err.to_string(),
+                        }));
                         warn!(
                             name = %prefix,
                             data_id = %data_id,
@@ -1608,14 +1476,12 @@ async fn materialize_colmap_binaries(
             }
         }
     } else {
-        ctx.ctrl
-            .log_event(json!({
-                "level": "warn",
-                "message": "missing colmap binaries",
-                "suffix": suffix,
-                "missing": missing,
-            }))
-            .await?;
+        let _ = task.log_event(json!({
+            "level": "warn",
+            "message": "missing colmap binaries",
+            "suffix": suffix,
+            "missing": missing,
+        }));
         warn!(
             suffix = %suffix,
             missing = ?missing,
@@ -1631,7 +1497,8 @@ async fn materialize_colmap_binaries(
 }
 
 async fn upload_colmap_result(
-    ctx: &compute_runner_api::TaskCtx<'_>,
+    _task: &TaskContext,
+    io: &TaskIo,
     job_root: &Path,
     refined_suffix: Option<&str>,
     upload_debug: bool,
@@ -1652,13 +1519,12 @@ async fn upload_colmap_result(
         "refined_splat".to_string()
     };
 
-    ctx.output
-        .put_domain_artifact(compute_runner_api::runner::DomainArtifactRequest {
+    io.put_domain_artifact(ArtifactRequest {
             rel_path: upload_key.as_str(),
             name: upload_key.as_str(),
             data_type: "splat_data",
             existing_id: None,
-            content: compute_runner_api::runner::DomainArtifactContent::File(&splat_abs),
+            content: ArtifactContent::File(&splat_abs),
         })
         .await
         .with_context(|| format!("upload {} as {}", splat_abs.display(), upload_key))?;
@@ -1679,14 +1545,12 @@ async fn upload_colmap_result(
                 };
                 let key = format!("debug_{}", file_name.replace('.', "_"));
                 let dtype = "debug_splat_artifact";
-                let _ = ctx
-                    .output
-                    .put_domain_artifact(compute_runner_api::runner::DomainArtifactRequest {
+                let _ = io.put_domain_artifact(ArtifactRequest {
                         rel_path: &key,
                         name: &key,
                         data_type: dtype,
                         existing_id: None,
-                        content: compute_runner_api::runner::DomainArtifactContent::File(&p),
+                        content: ArtifactContent::File(&p),
                     })
                     .await;
             }
@@ -1706,7 +1570,7 @@ fn split_name_and_dtype(filename: &str) -> Option<(String, String)> {
     Some((name.to_string(), dtype.to_string()))
 }
 
-async fn upload_staged_outputs(ctx: &compute_runner_api::TaskCtx<'_>, job_root: &Path) -> Result<()> {
+async fn upload_staged_outputs(_task: &TaskContext, io: &TaskIo, job_root: &Path) -> Result<()> {
     let output_dir = job_root.join("output");
     if !output_dir.exists() {
         return Err(anyhow!("expected output directory missing: {}", output_dir.display()));
@@ -1726,13 +1590,12 @@ async fn upload_staged_outputs(ctx: &compute_runner_api::TaskCtx<'_>, job_root: 
             warn!(file = %filename, "skipping output without name.data_type convention");
             continue;
         };
-        ctx.output
-            .put_domain_artifact(compute_runner_api::runner::DomainArtifactRequest {
+        io.put_domain_artifact(ArtifactRequest {
                 rel_path: filename,
                 name: &name,
                 data_type: &data_type,
                 existing_id: None,
-                content: compute_runner_api::runner::DomainArtifactContent::File(&path),
+                content: ArtifactContent::File(&path),
             })
             .await
             .with_context(|| format!("upload staged output {}", path.display()))?;

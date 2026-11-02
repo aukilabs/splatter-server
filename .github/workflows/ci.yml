@@ -9,14 +9,37 @@ on:
       - "chore/**"
       - "hotfix/**"
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   checks:
-    uses: aukilabs/github-actions/.github/workflows/rust-workflow.yml@v2
-    with:
-      work_dir: server/rust
-      enable_test: true
-      enable_build: false
-      test_command: |
-        cargo fmt --all -- --check
-        cargo clippy --workspace --all-targets --all-features -- -D warnings
-        cargo test --workspace --all-features
+    name: Checks
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: server/rust
+
+      - name: Rust fmt check
+        working-directory: server/rust
+        run: cargo fmt --all --check
+
+      - name: Rust clippy (deny warnings)
+        working-directory: server/rust
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+      - name: Rust tests
+        working-directory: server/rust
+        run: cargo test --workspace --all-features --locked
