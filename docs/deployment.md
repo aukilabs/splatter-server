@@ -94,7 +94,12 @@ You can also pin a specific release tag, for example `aukilabs/splatter-server:v
 ### Building Docker
 
 ```bash
-docker build -t splatter-server .
+# Same pattern as reconstruction-server: BuildKit secret for private Auki SDK,
+# and SPLATTER_VERSION into the node binary (default 0.0.0-local).
+DOCKER_BUILDKIT=1 docker build \
+  --secret id=github_token,env=GLOBAL_AUKI_CHECKOUT_TOKEN \
+  --build-arg SPLATTER_VERSION=0.0.0-local \
+  -f Dockerfile -t splatter-server .
 ```
 
 Run the image as described in Option 1, and follow the same verification steps.
