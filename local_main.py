@@ -10,11 +10,9 @@ import subprocess
 import crop_aabb
 import black_pixel_masks
 
-LICHTFELD_TRAIN_HELPER = os.environ.get(
-    "LICHTFELD_TRAIN_HELPER", "/app/scripts/train_helper.sh"
-)
+_TRAIN_HELPER = Path(__file__).resolve().parent / "scripts" / "train_helper.sh"
 
-
+# LichtFeld progress lines: "<iter>/<total> ... Loss: <value>"
 _TRAINING_RE = re.compile(
     r"(\d+)/(\d+)"  # iter/total
     r".*?Loss:\s*([\d.]+)"  # loss value
@@ -92,7 +90,6 @@ def train_splat(
     output_dir: Path,
     images_dir: Path = None,
     iterations: int = 30000,
-    use_crop: bool = True,
 ) -> None:
     if not images_dir:
         images_dir = colmap_dir / "images"
@@ -101,7 +98,7 @@ def train_splat(
     black_pixel_masks.ensure_black_pixel_masks(scene_dir / "images", scene_dir=scene_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     cmd = [
-        LICHTFELD_TRAIN_HELPER,
+        str(_TRAIN_HELPER),
         "-i",
         str(iterations),
         "-r",
@@ -109,20 +106,17 @@ def train_splat(
         str(scene_dir),
         str(output_dir),
     ]
-    if not use_crop:
-        cmd.append("--no-crop")
-    else:
-        try:
-            cropbox = crop_aabb.compute_training_cropbox(
-                init_ply=None,
-                colmap_dir=colmap_dir,
-            )
-            cmd.extend(["--cropbox", cropbox])
-        except (FileNotFoundError, ValueError) as exc:
-            print(
-                f"[train_splat] crop AABB skipped ({exc}); training without --cropbox",
-                flush=True,
-            )
+    try:
+        cropbox = crop_aabb.compute_training_cropbox(
+            init_ply=None,
+            colmap_dir=colmap_dir,
+        )
+        cmd.extend(["--cropbox", cropbox])
+    except (FileNotFoundError, ValueError) as exc:
+        print(
+            f"[train_splat] crop AABB skipped ({exc}); training without --cropbox",
+            flush=True,
+        )
     _run_training_cmd(cmd)
 
 

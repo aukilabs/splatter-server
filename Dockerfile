@@ -1,6 +1,10 @@
 ##
 ## Multi-stage: rust-build → lichtfeld-build → lean runtime (no /app/vcpkg tree).
-## Build: `docker build -f Dockerfile -t splatter-server:v0.2-dev .`
+## Local build (same version + Auki SDK auth pattern as reconstruction-server):
+##   DOCKER_BUILDKIT=1 docker build \
+##     --secret id=github_token,env=GLOBAL_AUKI_CHECKOUT_TOKEN \
+##     --build-arg SPLATTER_VERSION=0.0.0-local \
+##     -f Dockerfile -t splatter-server .
 ##
 ARG SPLATTER_VERSION=0.0.0-local
 
@@ -10,9 +14,14 @@ ARG SPLATTER_VERSION=0.0.0-local
 FROM --platform=$BUILDPLATFORM rust:1.89-bullseye AS rust-build
 ARG SPLATTER_VERSION
 ENV SPLATTER_VERSION="${SPLATTER_VERSION}"
+ENV CARGO_NET_GIT_FETCH_WITH_CLI=true
 WORKDIR /app
 COPY server/rust/ server/rust/
-RUN cargo build --release -p splatter-bin --manifest-path server/rust/Cargo.toml
+# Auki SDK is a private git dep; CI/local Docker builds pass --secret id=github_token
+RUN --mount=type=secret,id=github_token \
+    git config --global url."https://x-access-token:$(cat /run/secrets/github_token)@github.com/".insteadOf "https://github.com/" \
+    && cargo build --release -p splatter-bin --manifest-path server/rust/Cargo.toml \
+    && rm -f /root/.gitconfig
 
 ##
 ## Stage 2: Build LichtFeld Studio
@@ -64,7 +73,6 @@ WORKDIR /app
 
 RUN git clone https://github.com/microsoft/vcpkg.git
 RUN cd vcpkg && ./bootstrap-vcpkg.sh -disableMetrics
-# Official LichtFeld release pin for splatter v0.2.
 ARG LICHTFELD_GIT_REF=v0.5.4.2
 RUN git clone --recursive https://github.com/MrNeRF/LichtFeld-Studio
 RUN cd LichtFeld-Studio && git checkout "${LICHTFELD_GIT_REF}" && git submodule update --init --recursive
@@ -101,9 +109,6 @@ FROM nvidia/cuda:12.8.0-devel-ubuntu24.04
 
 ARG SPLATTER_VERSION
 ENV SPLATTER_SERVER_VERSION="${SPLATTER_VERSION}"
-
-ARG TARGETPLATFORM TARGETARCH TARGETOS
-ARG USERNAME=splatter-server
 ARG USER_UID=1000
 ARG USER_GID=$USER_UID
 ARG DEBIAN_FRONTEND=noninteractive
@@ -138,15 +143,13 @@ COPY --from=lichtfeld-build /lichtfeld-dist/lib/ /app/LichtFeld-Studio/build/lib
 COPY --from=lichtfeld-build /lichtfeld-dist/vcpkg_lib/ /app/LichtFeld-Studio/build/vcpkg_installed/x64-linux/lib/
 ENV LD_LIBRARY_PATH="/app/LichtFeld-Studio/build/lib:/app/LichtFeld-Studio/build/vcpkg_installed/x64-linux/lib:${LD_LIBRARY_PATH}"
 
-# Python environment for the new splatter pipeline
 RUN python3.12 -m venv /app/venv
 ENV PATH="/app/venv/bin:$PATH"
 COPY requirements.txt /app/requirements.txt
 RUN python -m pip install --no-cache-dir --upgrade pip && \
     python -m pip install --no-cache-dir -r /app/requirements.txt
 
-# Pipeline code
-COPY splatter_pipeline.py artifact_naming.py local_main.py global_main.py combine_splats.py convert_splat.py filter_splats.py preprocessing.py partition_splat.py crop_aabb.py black_pixel_masks.py /app/
+COPY splatter_pipeline.py artifact_naming.py local_main.py global_main.py combine_splats.py splat_transform_math.py convert_splat.py filter_splats.py preprocessing.py partition_splat.py crop_aabb.py black_pixel_masks.py /app/
 
 COPY scripts/train_helper.sh /app/scripts/
 RUN chmod +x /app/scripts/train_helper.sh \
@@ -154,20 +157,11 @@ RUN chmod +x /app/scripts/train_helper.sh \
 
 COPY config/lichtfeld_optimization_params.json /app/config/
 
-# Compute node binary built from source
 COPY --from=rust-build /app/server/rust/target/release/splatter-bin /app/splatter
 
-# Runtime configuration
+# Paths above match code defaults (LFS under /app/LichtFeld-Studio, helper under /app/scripts).
 ENV TASKS_ROOT=/app/tasks
-ENV LICHTFELD_BIN=/app/LichtFeld-Studio/build/LichtFeld-Studio
-ENV LFS_EXE=/app/LichtFeld-Studio/build/LichtFeld-Studio
-ENV LICHTFELD_TRAIN_HELPER=/app/scripts/train_helper.sh
-ENV LFS_ROOT=/app/LichtFeld-Studio
-ENV LICHTFELD_CONFIG=/app/config/lichtfeld_optimization_params.json
-ENV SPLATTER_ENABLE_LICHTFELD_COLMAP=true
-ENV SPLATTER_USE_LEGACY_COLMAP_RUN_PY=false
 
-# Non-root runtime: only chown directories the process actually writes to
 RUN useradd -u "$USER_UID" -o -m user || true \
     && mkdir -p /app/tasks \
     && chown -R "$USER_UID:$USER_GID" /app/tasks

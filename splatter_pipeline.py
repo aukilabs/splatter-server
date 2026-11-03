@@ -133,7 +133,7 @@ def _progress(stage: str, pct: int | None = None, detail: str = "") -> None:
 
 
 def run_colmap_single_splat(job_root: Path, iterations: int) -> dict:
-    """DMT colmap/v1 product: Splattr preprocess + train, then filter→rotate→``splat_rot.splat``."""
+    """DMT colmap/v1 product: Splatter preprocess + train, then filter→rotate→``splat_rot.splat``."""
     scan_ids = discover_scan_ids(job_root)
     if not scan_ids:
         raise ValueError("no scans found in datasets")

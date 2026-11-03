@@ -1,8 +1,8 @@
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
-use node_host::auki_sdk::DataListQuery;
 use node_host::{
-    process, telemetry, ArtifactContent, ArtifactRequest, NodeRunner, Router, TaskContext, TaskIo,
+    process, telemetry, ArtifactContent, ArtifactRequest, Materialized, NodeRunner, Router,
+    TaskContext, TaskIo,
 };
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -153,39 +153,162 @@ fn splatter_partition_size() -> String {
     env::var("SPLATTER_PARTITION_SIZE").unwrap_or_else(|_| "10".to_string())
 }
 
-/// Extract (domain_server_base, domain_id) from a full data CID URL.
-fn parse_domain_from_cid(cid: &str) -> Option<(String, String)> {
-    // Expect form: https://domain-server/api/v1/domains/{domain_id}/data/{data_id}
-    let prefix = "/api/v1/domains/";
-    let pos = cid.find(prefix)?;
-    let base = cid[..pos].to_string();
-    let rest = &cid[pos + prefix.len()..];
-    let mut parts = rest.splitn(2, '/');
-    let domain_id = parts.next()?.to_string();
-    Some((base, domain_id))
+/// Map a bare `inputs_cids` artifact name to (lookup_name, data_type) for `io.find`.
+fn input_name_query(mode: CapabilityMode, raw: &str) -> Option<(String, &'static str)> {
+    let raw = raw.trim();
+    if raw.starts_with("dmt_recording_") {
+        let query_name = raw.trim_end_matches(".mp4").to_string();
+        return Some((query_name, "dmt_recording_mp4"));
+    }
+    if let Some(scan_id) = raw.strip_prefix("refined_scan_") {
+        if scan_id.is_empty() {
+            return None;
+        }
+        return match mode {
+            CapabilityMode::GlobalV1 => Some((format!("local_splat_sog_{scan_id}"), "local_splat_sog")),
+            CapabilityMode::ColmapV1 | CapabilityMode::LocalV1 => {
+                Some((raw.to_string(), "refined_scan_zip"))
+            }
+        };
+    }
+    if mode == CapabilityMode::GlobalV1 {
+        if raw.starts_with("local_splat_sog_") {
+            return Some((raw.to_string(), "local_splat_sog"));
+        }
+        if raw.starts_with("refined_manifest") {
+            return Some((raw.to_string(), "refined_manifest_json"));
+        }
+    }
+    None
 }
 
-/// Map a GlobalV1 input name (dataID or bare input cid) to (lookup_name, data_type).
-/// Manifests often list `refined_scan_<scan_id>` even for global; those resolve to
-/// `local_splat_sog_<scan_id>` (legacy `local_splat_ply_*` still accepted).
-fn global_input_name_query(raw: &str) -> Option<(String, &'static str)> {
-    if raw.starts_with("local_splat_sog_") {
-        Some((raw.to_string(), "local_splat_sog"))
-    } else if raw.starts_with("local_splat_ply_") {
-        Some((raw.to_string(), "local_splat_ply"))
-    } else if raw.starts_with("refined_manifest") {
-        Some((raw.to_string(), "refined_manifest_json"))
-    } else if let Some(scan_id) = raw.strip_prefix("refined_scan_") {
-        if scan_id.is_empty() {
-            None
-        } else {
-            Some((format!("local_splat_sog_{scan_id}"), "local_splat_sog"))
+fn reject_data_ids_envelope(bytes: &[u8], cid: &str) -> Result<()> {
+    let Ok(parsed) = serde_json::from_slice::<Value>(bytes) else {
+        return Ok(());
+    };
+    if parsed.get("dataIDs").is_some() {
+        return Err(anyhow!(
+            "input {} uses a dataIDs JSON envelope; pass domain-data URLs or artifact names in inputs_cids instead",
+            cid
+        ));
+    }
+    Ok(())
+}
+
+fn merge_download_summary(into: &mut DownloadSummary, from: DownloadSummary) {
+    into.datasets_downloaded += from.datasets_downloaded;
+    for scan_id in from.scan_ids {
+        if !into.scan_ids.contains(&scan_id) {
+            into.scan_ids.push(scan_id);
         }
-    } else {
-        None
     }
 }
 
+async fn stage_materialized_url_input(
+    mode: CapabilityMode,
+    materialized: &Materialized,
+    job_root: &Path,
+    task: &TaskContext,
+) -> Result<DownloadSummary> {
+    let mut summary = DownloadSummary::default();
+    let name = materialized.name.as_deref();
+    let data_type = materialized.data_type.as_deref();
+    let cid = materialized.cid.as_str();
+
+    let bytes = tokio::fs::read(&materialized.path)
+        .await
+        .with_context(|| format!("read materialized path {}", materialized.path.display()))?;
+    reject_data_ids_envelope(&bytes, cid)?;
+
+    if mode == CapabilityMode::GlobalV1 {
+        let parsed: Option<Value> = serde_json::from_slice(&bytes).ok();
+        let is_refined_manifest = data_type == Some("refined_manifest_json")
+            || name.is_some_and(|n| n.starts_with("refined_manifest"))
+            || parsed.as_ref().is_some_and(|v| v.get("alignedScans").is_some());
+        if is_refined_manifest {
+            let dest = job_root
+                .join("refined")
+                .join("global")
+                .join("refined_manifest.json");
+            if let Some(parent) = dest.parent() {
+                tokio::fs::create_dir_all(parent).await?;
+            }
+            tokio::fs::write(&dest, &bytes).await.with_context(|| {
+                format!("stage refined manifest to {}", dest.display())
+            })?;
+            info!(dest = %dest.display(), name = ?name, "staged refined manifest from url input");
+            let _ = task.log_event(json!({
+                "level": "info",
+                "message": "staged refined manifest from url input",
+                "dest": dest.display().to_string(),
+                "name": name,
+            }));
+            return Ok(summary);
+        }
+
+        if data_type == Some("local_splat_sog") || name.is_some_and(|n| n.starts_with("local_splat_sog_"))
+        {
+            let name = name.ok_or_else(|| {
+                anyhow!("local_splat_sog url input missing artifact name (cid={})", cid)
+            })?;
+            let scan_id = normalize_scan_id(name.trim_start_matches("local_splat_sog_"));
+            let sog_name = format!("splat_{}.filtered.sog", splatter_iterations());
+            let dest = job_root
+                .join("refined")
+                .join("local")
+                .join(&scan_id)
+                .join("splat")
+                .join(sog_name);
+            if let Some(parent) = dest.parent() {
+                tokio::fs::create_dir_all(parent).await?;
+            }
+            tokio::fs::copy(&materialized.path, &dest).await?;
+            tokio::fs::create_dir_all(job_root.join("datasets").join(&scan_id)).await?;
+            summary.datasets_downloaded += 1;
+            summary.scan_ids.push(scan_id);
+            return Ok(summary);
+        }
+    }
+
+    if mode != CapabilityMode::GlobalV1 && is_direct_dataset_input(name, data_type) {
+        let scan_id = if mode == CapabilityMode::LocalV1 {
+            scan_id_from_dataset_artifact(name, data_type).ok_or_else(|| {
+                anyhow!(
+                    "local capability requires scan_id from artifact name/data_type (cid={})",
+                    cid
+                )
+            })?
+        } else {
+            scan_id_from_dataset_artifact(name, data_type).unwrap_or_else(|| {
+                materialized
+                    .path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .map(normalize_scan_id)
+                    .unwrap_or_else(|| "scan".to_string())
+            })
+        };
+        let Some(dest) = dataset_dest_path(job_root, &scan_id, name, data_type, &materialized.path)
+        else {
+            return Err(anyhow!("cannot stage dataset url input {}", cid));
+        };
+        if let Some(parent) = dest.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+        tokio::fs::copy(&materialized.path, &dest).await?;
+        summary.datasets_downloaded += 1;
+        summary.scan_ids.push(scan_id);
+        return Ok(summary);
+    }
+
+    warn!(
+        cid = %cid,
+        name = ?name,
+        data_type = ?data_type,
+        "url input did not match a known staging rule"
+    );
+    Ok(summary)
+}
 
 async fn download_item(io: &TaskIo, id: Uuid, size: u64, dest: &Path) -> Result<u64> {
     let result = io.download_to(id, size, dest).await;
@@ -236,7 +359,6 @@ impl NodeRunner for SplatterRunner {
 
         ensure_task_not_cancelled(task, "before execution")?;
         let mut refined_suffix: Option<String> = None;
-        let mut domain_id_from_input: Option<String> = None;
         let mode = match self.capability {
             CAPABILITY_COLMAP_V1 => CapabilityMode::ColmapV1,
             CAPABILITY_LOCAL_V1 => CapabilityMode::LocalV1,
@@ -255,8 +377,6 @@ impl NodeRunner for SplatterRunner {
         let task_result: Result<()> = async {
             task.progress(json!({ "status": "started" }))?;
 
-            // Materialize all input CIDs. Older /splatter/colmap/v1 jobs can provide
-            // multiple input CIDs, so preserve that behavior for compatibility.
             let input_cids = spec.inputs_cids.clone();
             info!(?input_cids, "input cids");
             let mut summary = DownloadSummary::default();
@@ -266,28 +386,19 @@ impl NodeRunner for SplatterRunner {
             }
 
             for cid in input_cids {
-                // Global (and some DMT jobs) pass artifact names as extra inputs_cids
-                // alongside the manifest URL. Those are not domain-data URLs — resolve
-                // by name instead of materialize_cid_with_meta.
                 if !is_url_cid(&cid) {
-                    if mode != CapabilityMode::GlobalV1 {
-                        return Err(anyhow!(
-                            "named input cid {} is only supported for /splatter/global/v1",
-                            cid
-                        ));
-                    }
-                    let Some((query_name, data_type)) = global_input_name_query(&cid) else {
-                        return Err(anyhow!("unsupported named input cid {}", cid));
+                    let Some((query_name, data_type)) = input_name_query(mode, &cid) else {
+                        return Err(anyhow!("unsupported named input in inputs_cids: {}", cid));
                     };
                     ensure_task_not_cancelled(task, "resolving named input")?;
                     let meta_list = io
                         .find(&query_name, Some(data_type))
                         .await
                         .map_err(|e| anyhow!(e))
-                        .with_context(|| format!("resolve named input cid {}", cid))?;
+                        .with_context(|| format!("resolve named input {}", cid))?;
                     let Some(meta) = meta_list.into_iter().next() else {
                         return Err(anyhow!(
-                            "named input cid {} resolved empty (name={} type={})",
+                            "named input {} resolved empty (name={} type={})",
                             cid,
                             query_name,
                             data_type
@@ -298,8 +409,8 @@ impl NodeRunner for SplatterRunner {
                         name = %meta.name,
                         data_type = %meta.data_type,
                         name_query = %query_name,
-                        raw_cid = %cid,
-                        "resolved named input cid by name"
+                        raw_input = %cid,
+                        "resolved named input by name"
                     );
                     if refined_suffix.is_none() {
                         refined_suffix = extract_refined_suffix(Some(&meta.name));
@@ -317,492 +428,47 @@ impl NodeRunner for SplatterRunner {
                         io,
                     )
                     .await
-                    .with_context(|| format!("materialize named input cid {}", cid))?;
-                    summary.datasets_downloaded += partial.datasets_downloaded;
-                    for scan_id in partial.scan_ids {
-                        if !summary.scan_ids.contains(&scan_id) {
-                            summary.scan_ids.push(scan_id);
-                        }
-                    }
+                    .with_context(|| format!("materialize named input {}", cid))?;
+                    merge_download_summary(&mut summary, partial);
                     continue;
                 }
 
-                let materialized = io.materialize(&cid).await
+                let materialized = io
+                    .materialize(&cid)
+                    .await
                     .with_context(|| format!("materialize cid {}", cid))?;
 
-            // Print metadata returned with the CID.
-            let metadata_json = json!({
-                "cid": materialized.cid,
-                "data_id": materialized.data_id,
-                "name": materialized.name,
-                "data_type": materialized.data_type,
-                "domain_id": materialized.domain_id,
-                "path": materialized.path,
-                "related_files": materialized.related_files,
-                "extracted_paths": materialized.extracted_paths,
-            });
-            info!(%cid, metadata = %metadata_json, "input cid metadata");
-            let _ = task.log_event(json!({
+                let metadata_json = json!({
+                    "cid": materialized.cid,
+                    "data_id": materialized.data_id,
+                    "name": materialized.name,
+                    "data_type": materialized.data_type,
+                    "domain_id": materialized.domain_id,
+                    "path": materialized.path,
+                    "related_files": materialized.related_files,
+                    "extracted_paths": materialized.extracted_paths,
+                });
+                info!(%cid, metadata = %metadata_json, "input cid metadata");
+                let _ = task.log_event(json!({
                     "level": "info",
                     "message": "input cid metadata",
                     "cid": cid.as_str(),
                     "metadata": metadata_json
                 }));
 
-            if refined_suffix.is_none() {
-                refined_suffix = extract_refined_suffix(materialized.name.as_deref());
+                if refined_suffix.is_none() {
+                    refined_suffix = extract_refined_suffix(materialized.name.as_deref());
+                }
+
+                let partial = stage_materialized_url_input(mode, &materialized, &job_root, task)
+                    .await
+                    .with_context(|| format!("stage url input {}", cid))?;
+                merge_download_summary(&mut summary, partial);
             }
 
-            // Always prefer CID-derived domain routing for data metadata/download calls.
-            // Lease-provided domain URL/ID can differ in some environments and cause
-            // "route not found" on domain-data endpoints.
-            if let Some((_base, dom_id)) = parse_domain_from_cid(&cid) {
-                domain_id_from_input = Some(dom_id);
-            }
-
-            // Read primary artifact bytes.
-            let bytes = tokio::fs::read(&materialized.path).await.with_context(|| {
-                format!("read materialized path {}", materialized.path.display())
-            })?;
-
-            // Parse JSON and extract dataIDs field.
-            let parsed_json: Value = match serde_json::from_slice(&bytes) {
-                Ok(v) => v,
-                Err(err)
-                    if mode == CapabilityMode::ColmapV1
-                        || (mode == CapabilityMode::LocalV1
-                            && is_direct_dataset_input(
-                                materialized.name.as_deref(),
-                                materialized.data_type.as_deref(),
-                            )) =>
-                {
-                    // Backward compatibility: colmap/local jobs may pass direct dataset
-                    // files rather than a dataIDs JSON envelope. LocalV1 derives scan_id
-                    // from artifact name/data_type (not path stem).
-                    warn!(%cid, error = %err, "input cid was not a JSON envelope; skipping dataIDs parsing");
-                    if let Some((copied_path, scan_id)) = try_materialize_dataset_from_input(
-                        &materialized.path,
-                        &job_root,
-                        materialized.name.as_deref(),
-                        materialized.data_type.as_deref(),
-                    )
-                    .await?
-                    {
-                        summary.datasets_downloaded += 1;
-                        if !summary.scan_ids.contains(&scan_id) {
-                            summary.scan_ids.push(scan_id.clone());
-                        }
-                        let _ = task.log_event(json!({
-                                "level": "info",
-                                "message": "materialized direct dataset input",
-                                "cid": cid.as_str(),
-                                "scan_id": scan_id,
-                                "path": copied_path.display().to_string(),
-                            }));
-                    }
-                    continue;
-                }
-                Err(err) => {
-                    return Err(err).with_context(|| format!("parse input cid {} as JSON", cid));
-                }
-            };
-            let data_ids = parsed_json.get("dataIDs").cloned().unwrap_or(Value::Null);
-            let data_id_list: Vec<String> = match &data_ids {
-                Value::Array(arr) => arr
-                    .iter()
-                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                    .collect(),
-                _ => Vec::new(),
-            };
-            info!(%cid, dataIDs = %data_ids, "parsed input dataIDs");
-            let _ = task.log_event(json!({
-                    "level": "info",
-                    "message": "parsed input json dataIDs",
-                    "cid": cid.as_str(),
-                    "dataIDs": data_ids
-                }));
-
-            // Global expects the refined manifest at
-            // job_root/refined/global/refined_manifest.json. When the task input
-            // CID *is* that artifact, stage it from the already-materialized bytes.
-            if mode == CapabilityMode::GlobalV1 {
-                let is_refined_manifest = materialized
-                    .data_type
-                    .as_deref()
-                    .is_some_and(|t| t == "refined_manifest_json")
-                    || materialized
-                        .name
-                        .as_deref()
-                        .is_some_and(|n| n.starts_with("refined_manifest"))
-                    || parsed_json.get("alignedScans").is_some();
-                if is_refined_manifest {
-                    let dest = job_root
-                        .join("refined")
-                        .join("global")
-                        .join("refined_manifest.json");
-                    if let Some(parent) = dest.parent() {
-                        tokio::fs::create_dir_all(parent).await?;
-                    }
-                    tokio::fs::write(&dest, &bytes).await.with_context(|| {
-                        format!("stage refined manifest to {}", dest.display())
-                    })?;
-                    info!(
-                        dest = %dest.display(),
-                        name = ?materialized.name,
-                        "staged refined manifest from input cid"
-                    );
-                    task.log_event(json!({
-                            "level": "info",
-                            "message": "staged refined manifest from input cid",
-                            "dest": dest.display().to_string(),
-                            "name": materialized.name,
-                        }));
-                }
-            }
-
-            if !data_id_list.is_empty() {
-                    ensure_task_not_cancelled(task, "resolving dataset metadata")?;
-                    let chunk_size = 50;
-                    let mut all_metadata = Vec::new();
-                    let id_list: Vec<Uuid> = data_id_list
-                        .iter()
-                        .filter_map(|raw| Uuid::parse_str(raw.trim()).ok())
-                        .collect();
-                    let mut downloaded_recordings: HashSet<String> = HashSet::new();
-                    for chunk in id_list.chunks(chunk_size) {
-                        let query = DataListQuery {
-                            ids: chunk.to_vec(),
-                            ..Default::default()
-                        };
-                        match io.list(&query).await.map_err(|e| anyhow!(e))
-                        {
-                            Ok(metadata) => {
-                                if metadata.is_empty() {
-                                    warn!(
-                                        chunk_len = chunk.len(),
-                                        "metadata fetch returned empty chunk"
-                                    );
-                                }
-                                for m in metadata {
-                                    let name_matches = m.name.starts_with("dmt_recording_");
-                                    if name_matches {
-                                        if downloaded_recordings.contains(&m.name) {
-                                            continue;
-                                        }
-                                        let folder_name = m
-                                            .name
-                                            .strip_prefix("dmt_recording_")
-                                            .unwrap_or(m.name.as_str())
-                                            .to_string();
-                                        let folder_name = if folder_name.is_empty() {
-                                            m.id.to_string()
-                                        } else {
-                                            folder_name
-                                        };
-                                        let dest_dir = datasets_dir.join(&folder_name);
-                                        let dest_path = dest_dir.join("Frames.mp4");
-                                        match download_item(io, m.id, m.size, &dest_path).await
-                                        {
-                                            Ok(bytes) => {
-                                                tokio::fs::create_dir_all(&dest_dir).await?;
-                                                summary.datasets_downloaded += 1;
-                                                downloaded_recordings.insert(m.name.clone());
-                                                if !summary.scan_ids.contains(&folder_name) {
-                                                    summary.scan_ids.push(folder_name.clone());
-                                                }
-
-                                                let _ = task.log_event(json!({
-                                                        "level": "info",
-                                                        "message": "downloaded dmt recording",
-                                                        "data_id": m.id.to_string(),
-                                                        "folder": folder_name,
-                                                        "bytes": bytes,
-                                                        "dest": dest_path.display().to_string(),
-                                                    }));
-                                            }
-                                            Err(err) => {
-                                                let _ = task.log_event(json!({
-                                                        "level": "warn",
-                                                        "message": "failed to download dmt recording",
-                                                        "data_id": m.id.to_string(),
-                                                        "error": err.to_string(),
-                                                    }));
-                                                warn!(
-                                                    data_id = %m.id,
-                                                    error = %err,
-                                                    "failed to download dmt recording"
-                                                );
-                                            }
-                                        }
-                                        continue;
-                                    }
-                                    info!(
-                                        data_id = %m.id,
-                                        name = %m.name,
-                                        data_type = %m.data_type,
-                                        "dataID metadata"
-                                    );
-                                    all_metadata.push(DataMeta {
-                                        id: m.id,
-                                        size: m.size,
-                                        name: m.name,
-                                        data_type: m.data_type,
-                                    });
-                                }
-                            }
-                            Err(err) => {
-                                warn!(
-                                    chunk_len = chunk.len(),
-                                    error = %err,
-                                    "metadata fetch failed for chunk"
-                                );
-                            }
-                        }
-                    }
-
-                    // Fallback for inputs that provide refined_scan_* / dmt_recording_*
-                    // names instead of domain data IDs: resolve artifacts by name.
-                    let mut seen_scan_ids: HashSet<String> = HashSet::new();
-                    let mut downloaded_refined_zips: HashSet<String> = HashSet::new();
-                    for raw in &data_id_list {
-                        let scan_id = if let Some(rest) = raw.strip_prefix("refined_scan_") {
-                            rest.to_string()
-                        } else if let Some(rest) = raw.strip_prefix("dmt_recording_") {
-                            rest.trim_end_matches(".mp4").to_string()
-                        } else {
-                            continue;
-                        };
-                        if scan_id.is_empty() || !seen_scan_ids.insert(scan_id.clone()) {
-                            continue;
-                        }
-                        let candidate_names = [
-                            format!("dmt_recording_{scan_id}"),
-                            format!("dmt_recording_{scan_id}.mp4"),
-                        ];
-                        for candidate_name in candidate_names {
-                            if downloaded_recordings.contains(&candidate_name) {
-                                break;
-                            }
-                            match io
-                                .find(&candidate_name, Some("dmt_recording_mp4"))
-                                .await
-                                .map_err(|e| anyhow!(e))
-                            {
-                                Ok(meta_list) => {
-                                    if let Some(meta) = meta_list.into_iter().next() {
-                                        let folder_name = scan_id.clone();
-                                        let dest_dir = datasets_dir.join(&folder_name);
-                                        let dest_path = dest_dir.join("Frames.mp4");
-                                        match download_item(io, meta.id, meta.size, &dest_path).await
-                                        {
-                                            Ok(bytes) => {
-                                                tokio::fs::create_dir_all(&dest_dir).await?;
-                                                summary.datasets_downloaded += 1;
-                                                downloaded_recordings.insert(candidate_name.clone());
-                                                if !summary.scan_ids.contains(&folder_name) {
-                                                    summary.scan_ids.push(folder_name.clone());
-                                                }
-                                                let _ = task.log_event(json!({
-                                                        "level": "info",
-                                                        "message": "downloaded derived dmt recording",
-                                                        "data_id": meta.id.to_string(),
-                                                        "folder": folder_name,
-                                                        "bytes": bytes,
-                                                        "dest": dest_path.display().to_string(),
-                                                        "name_query": candidate_name,
-                                                    }));
-                                                break;
-                                            }
-                                            Err(err) => {
-                                                warn!(
-                                                    data_id = %meta.id,
-                                                    scan_id = %scan_id,
-                                                    error = %err,
-                                                    "failed to download derived dmt recording"
-                                                );
-                                            }
-                                        }
-                                    }
-                                }
-                                Err(err) => {
-                                    warn!(
-                                        scan_id = %scan_id,
-                                        name_query = %candidate_name,
-                                        error = %err,
-                                        "failed metadata lookup for derived dmt recording"
-                                    );
-                                }
-                            }
-                        }
-
-                        // LocalV1 also needs RefinedScan.zip; resolve refined_scan_* by name
-                        // the same way we derive the recording when dataIDs are names.
-                        if mode == CapabilityMode::LocalV1
-                            && !downloaded_refined_zips.contains(&scan_id)
-                        {
-                            let dest_path =
-                                datasets_dir.join(&scan_id).join("RefinedScan.zip");
-                            if tokio::fs::try_exists(&dest_path).await.unwrap_or(false) {
-                                downloaded_refined_zips.insert(scan_id.clone());
-                            } else {
-                                let refined_name = format!("refined_scan_{scan_id}");
-                                match io
-                                    .find(&refined_name, Some("refined_scan_zip"))
-                                    .await
-                                    .map_err(|e| anyhow!(e))
-                                {
-                                    Ok(meta_list) => {
-                                        if let Some(meta) = meta_list.into_iter().next() {
-                                            match download_item(io, meta.id, meta.size, &dest_path).await
-                                            {
-                                                Ok(bytes) => {
-                                                    summary.datasets_downloaded += 1;
-                                                    downloaded_refined_zips.insert(scan_id.clone());
-                                                    if !summary.scan_ids.contains(&scan_id) {
-                                                        summary.scan_ids.push(scan_id.clone());
-                                                    }
-                                                    let _ = task.log_event(json!({
-                                                            "level": "info",
-                                                            "message": "downloaded derived refined scan zip",
-                                                            "data_id": meta.id.to_string(),
-                                                            "scan_id": scan_id,
-                                                            "bytes": bytes,
-                                                            "dest": dest_path.display().to_string(),
-                                                            "name_query": refined_name,
-                                                        }));
-                                                }
-                                                Err(err) => {
-                                                    warn!(
-                                                        data_id = %meta.id,
-                                                        scan_id = %scan_id,
-                                                        error = %err,
-                                                        "failed to download derived refined scan zip"
-                                                    );
-                                                }
-                                            }
-                                        } else {
-                                            warn!(
-                                                scan_id = %scan_id,
-                                                name_query = %refined_name,
-                                                "refined scan zip metadata empty for name query"
-                                            );
-                                        }
-                                    }
-                                    Err(err) => {
-                                        warn!(
-                                            scan_id = %scan_id,
-                                            name_query = %refined_name,
-                                            error = %err,
-                                            "failed metadata lookup for derived refined scan zip"
-                                        );
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    // GlobalV1: dataIDs may be artifact names (local_splat_sog_*,
-                    // refined_scan_* → local_splat_sog_*, refined_manifest*) instead
-                    // of UUIDs — resolve by name.
-                    if mode == CapabilityMode::GlobalV1 {
-                        for raw in &data_id_list {
-                            let Some((query_name, data_type)) = global_input_name_query(raw) else {
-                                continue;
-                            };
-                            if all_metadata.iter().any(|m| m.name == query_name || m.name == *raw)
-                            {
-                                continue;
-                            }
-                            match io
-                                .find(&query_name, Some(data_type))
-                                .await
-                                .map_err(|e| anyhow!(e))
-                            {
-                                Ok(meta_list) => {
-                                    if let Some(meta) = meta_list.into_iter().next() {
-                                        info!(
-                                            data_id = %meta.id,
-                                            name = %meta.name,
-                                            data_type = %meta.data_type,
-                                            name_query = %query_name,
-                                            raw = %raw,
-                                            "resolved global input by name"
-                                        );
-                                        let _ = task.log_event(json!({
-                                                "level": "info",
-                                                "message": "resolved global input by name",
-                                                "data_id": meta.id,
-                                                "name": meta.name,
-                                                "data_type": meta.data_type,
-                                                "name_query": query_name,
-                                                "raw": raw,
-                                            }));
-                                        if refined_suffix.is_none() {
-                                            refined_suffix =
-                                                extract_refined_suffix(Some(&meta.name));
-                                        }
-                                        all_metadata.push(DataMeta {
-                                            id: meta.id,
-                                            size: meta.size,
-                                            name: meta.name,
-                                            data_type: meta.data_type,
-                                        });
-                                    } else {
-                                        warn!(
-                                            name_query = %query_name,
-                                            data_type = %data_type,
-                                            raw = %raw,
-                                            "global name lookup returned empty metadata"
-                                        );
-                                    }
-                                }
-                                Err(err) => {
-                                    warn!(
-                                        name_query = %query_name,
-                                        data_type = %data_type,
-                                        raw = %raw,
-                                        error = %err,
-                                        "failed metadata lookup for global name input"
-                                    );
-                                }
-                            }
-                        }
-                    }
-
-                    if refined_suffix.is_none() {
-                        for m in &all_metadata {
-                            if let Some(suffix) = extract_refined_suffix(Some(&m.name)) {
-                                refined_suffix = Some(suffix);
-                                break;
-                            }
-                        }
-                    }
-
-                    let partial = materialize_inputs_for_mode(
-                        mode,
-                        &all_metadata,
-                        &job_root,
-                        task,
-                        io,
-                    )
+            if mode == CapabilityMode::ColmapV1 {
+                materialize_colmap_binaries(refined_suffix.as_deref(), &job_root, task, io)
                     .await?;
-                    summary.datasets_downloaded += partial.datasets_downloaded;
-                    for scan_id in partial.scan_ids {
-                        if !summary.scan_ids.contains(&scan_id) {
-                            summary.scan_ids.push(scan_id);
-                        }
-                    }
-
-                    if mode == CapabilityMode::ColmapV1 {
-                        materialize_colmap_binaries(
-                            refined_suffix.as_deref(),
-                            &job_root,
-                            task,
-                            io,
-                        )
-                        .await?;
-                    }
-                }
             }
 
         // Keep backward compatibility for /splatter/colmap/v1: historically this
@@ -1092,14 +758,7 @@ impl NodeRunner for SplatterRunner {
 
         match mode {
             CapabilityMode::ColmapV1 => {
-                upload_colmap_result(
-                    task,
-                    io,
-                    &job_root,
-                    refined_suffix.as_deref(),
-                    bool_env("SPLATTER_UPLOAD_DEBUG_ARTIFACTS", false),
-                )
-                .await?;
+                upload_colmap_result(task, io, &job_root, refined_suffix.as_deref()).await?;
             }
             CapabilityMode::LocalV1 | CapabilityMode::GlobalV1 => {
                 upload_staged_outputs(task, io, &job_root).await?;
@@ -1204,7 +863,7 @@ async fn materialize_inputs_for_mode(
                         }));
                     continue;
                 }
-                if mode == CapabilityMode::LocalV1
+                if (mode == CapabilityMode::LocalV1 || mode == CapabilityMode::ColmapV1)
                     && (data_type == "refined_scan_zip" || m.name.starts_with("refined_scan_"))
                 {
                     let scan_id = normalize_scan_id(m.name.trim_start_matches("refined_scan_"));
@@ -1241,30 +900,6 @@ async fn materialize_inputs_for_mode(
                     let _ = task.log_event(json!({
                             "level": "info",
                             "message": "downloaded local splat sog",
-                            "data_id": m.id.to_string(),
-                            "scan_id": scan_id,
-                            "bytes": bytes,
-                            "dest": dest.display().to_string(),
-                        }));
-                    continue;
-                }
-                if data_type == "local_splat_ply" || m.name.starts_with("local_splat_ply_") {
-                    let scan_id = normalize_scan_id(m.name.trim_start_matches("local_splat_ply_"));
-                    let ply_name = format!("splat_{}.filtered.ply", splatter_iterations());
-                    let dest = job_root
-                        .join("refined")
-                        .join("local")
-                        .join(&scan_id)
-                        .join("splat")
-                        .join(ply_name);
-                    let bytes = download_item(io, m.id, m.size, &dest).await?;
-                    let dataset_dir = job_root.join("datasets").join(&scan_id);
-                    tokio::fs::create_dir_all(&dataset_dir).await?;
-                    summary.datasets_downloaded += 1;
-                    scan_set.insert(scan_id.clone());
-                    let _ = task.log_event(json!({
-                            "level": "info",
-                            "message": "downloaded local splat ply (legacy)",
                             "data_id": m.id.to_string(),
                             "scan_id": scan_id,
                             "bytes": bytes,
@@ -1345,7 +980,7 @@ fn dataset_dest_path(
         return Some(job_root.join("datasets").join(scan_id).join("RefinedScan.zip"));
     }
 
-    // Colmap legacy: infer from file extension when name/type are unavailable.
+    // Infer from file extension when name/type are unavailable.
     let ext = input_path
         .extension()
         .and_then(|s| s.to_str())
@@ -1358,28 +993,6 @@ fn dataset_dest_path(
     } else {
         None
     }
-}
-
-async fn try_materialize_dataset_from_input(
-    input_path: &Path,
-    job_root: &Path,
-    name: Option<&str>,
-    data_type: Option<&str>,
-) -> Result<Option<(PathBuf, String)>> {
-    let scan_id = scan_id_from_dataset_artifact(name, data_type).or_else(|| {
-        input_path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .map(normalize_scan_id)
-    }).unwrap_or_else(|| "scan".to_string());
-    let Some(dest) = dataset_dest_path(job_root, &scan_id, name, data_type, input_path) else {
-        return Ok(None);
-    };
-    if let Some(parent) = dest.parent() {
-        tokio::fs::create_dir_all(parent).await?;
-    }
-    tokio::fs::copy(input_path, &dest).await?;
-    Ok(Some((dest, scan_id)))
 }
 
 async fn materialize_colmap_binaries(
@@ -1501,7 +1114,6 @@ async fn upload_colmap_result(
     io: &TaskIo,
     job_root: &Path,
     refined_suffix: Option<&str>,
-    upload_debug: bool,
 ) -> Result<()> {
     let splat_abs = job_root.join("refined").join("splatter").join("splat_rot.splat");
     if !splat_abs.exists() {
@@ -1528,34 +1140,6 @@ async fn upload_colmap_result(
         })
         .await
         .with_context(|| format!("upload {} as {}", splat_abs.display(), upload_key))?;
-
-    if upload_debug {
-        let debug_dir = job_root.join("refined").join("splatter");
-        if let Ok(mut rd) = tokio::fs::read_dir(&debug_dir).await {
-            while let Some(entry) = rd.next_entry().await? {
-                let p = entry.path();
-                if !p.is_file() {
-                    continue;
-                }
-                if p.file_name().and_then(|v| v.to_str()) == Some("splat_rot.splat") {
-                    continue;
-                }
-                let Some(file_name) = p.file_name().and_then(|v| v.to_str()) else {
-                    continue;
-                };
-                let key = format!("debug_{}", file_name.replace('.', "_"));
-                let dtype = "debug_splat_artifact";
-                let _ = io.put_domain_artifact(ArtifactRequest {
-                        rel_path: &key,
-                        name: &key,
-                        data_type: dtype,
-                        existing_id: None,
-                        content: ArtifactContent::File(&p),
-                    })
-                    .await;
-            }
-        }
-    }
 
     Ok(())
 }
@@ -1620,5 +1204,26 @@ mod product_contract_tests {
         );
         assert!(!convert_to_splat_default(CapabilityMode::LocalV1));
         assert!(!convert_to_splat_default(CapabilityMode::GlobalV1));
+    }
+
+    #[test]
+    fn input_name_query_maps_artifact_names_by_mode() {
+        assert_eq!(
+            input_name_query(CapabilityMode::LocalV1, "dmt_recording_abc.mp4"),
+            Some(("dmt_recording_abc".to_string(), "dmt_recording_mp4"))
+        );
+        assert_eq!(
+            input_name_query(CapabilityMode::ColmapV1, "refined_scan_scan1"),
+            Some(("refined_scan_scan1".to_string(), "refined_scan_zip"))
+        );
+        assert_eq!(
+            input_name_query(CapabilityMode::GlobalV1, "refined_scan_scan1"),
+            Some(("local_splat_sog_scan1".to_string(), "local_splat_sog"))
+        );
+        assert_eq!(
+            input_name_query(CapabilityMode::GlobalV1, "refined_manifest_2026-01-01"),
+            Some(("refined_manifest_2026-01-01".to_string(), "refined_manifest_json"))
+        );
+        assert!(input_name_query(CapabilityMode::LocalV1, "local_splat_sog_x").is_none());
     }
 }

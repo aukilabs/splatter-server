@@ -11,7 +11,7 @@
     "iterations": 30000,
     "max_cap": 1000000,
     "gut": false,
-    "sh_degree": 3,
+    "sh_degree": 2,
     "sh_degree_interval": 1000,
     "steps_scaler": 1.0,
     "means_lr": 0.00002,
