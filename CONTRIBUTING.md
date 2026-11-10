@@ -32,7 +32,7 @@ By contributing, you agree that your contributions will be licensed under the sa
 
 ## Run Trainer
 
-Product capabilities are driven by `splatter_pipeline.py` (see `CAPABILITIES.md` for contracts):
+Node capabilities are driven by `splatter_pipeline.py` (see `docs/compute-capability.md` for contracts):
 
 ```bash
 # Legacy single-scan .splat upload path
@@ -53,7 +53,7 @@ python3 splatter_pipeline.py --mode global_only --job_root_path {path/to/job/roo
 ├── datasets
 │   └── {scan_id}
 │       ├── Frames.mp4          # or extracted Frames/
-│       └── RefinedScan.zip     # sfm/ COLMAP model inside
+│       └── RefinedScan.zip     # COLMAP *.{bin,csv,txt}
 └── refined
     └── global
         └── refined_manifest.json   # global mode only
@@ -61,7 +61,7 @@ python3 splatter_pipeline.py --mode global_only --job_root_path {path/to/job/roo
 
 ## Output Files
 ```bash
-# Output Files (product paths)
+# Output Files (node capability paths)
 {job_root_path}
 ├── refined
 │   ├── splatter

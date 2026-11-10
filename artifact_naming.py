@@ -14,23 +14,13 @@ def rename_for_domain_upload(
     manifest_timestamp: str | None = None,
     lod_level: str | None = None,
 ) -> str | None:
-    """Map generated global partition outputs to domain upload naming."""
+    """Map generated global SOG partition outputs to domain upload naming."""
     if filename in {"combined_splat.ply", "coarse.ply", "fine.ply"}:
         return None
 
     lod = lod_level or _lod_from_filename(filename)
     if lod is None:
         return None
-
-    splat_match = re.match(rf"{lod}_partition_(.+)\.splat$", filename)
-    if splat_match:
-        suffix = splat_match.group(1)
-        if manifest_timestamp:
-            return (
-                f"splat_partition_{lod}_{suffix}_{manifest_timestamp}"
-                f".splat_partition"
-            )
-        return f"splat_partition_{suffix}.splat_partition"
 
     sog_match = re.match(rf"{lod}_partition_(.+)\.sog$", filename)
     if sog_match:

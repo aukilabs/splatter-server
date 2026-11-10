@@ -56,13 +56,3 @@ venv/
 
 # Server data for tasks
 tasks/
-
-# Local experiments / dumps (never commit secrets or large artifacts)
-tmp/
-_splatter_env.json
-splatter-bin-new
-*.ply
-!config/**
-!third_party/**
-
-# Other

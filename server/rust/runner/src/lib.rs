@@ -145,10 +145,6 @@ fn splatter_iterations() -> String {
     env::var("SPLATTER_ITERATIONS").unwrap_or_else(|_| "30000".to_string())
 }
 
-fn convert_to_splat_default(mode: CapabilityMode) -> bool {
-    matches!(mode, CapabilityMode::ColmapV1)
-}
-
 fn splatter_partition_size() -> String {
     env::var("SPLATTER_PARTITION_SIZE").unwrap_or_else(|_| "10".to_string())
 }
@@ -171,28 +167,146 @@ fn input_name_query(mode: CapabilityMode, raw: &str) -> Option<(String, &'static
             }
         };
     }
-    if mode == CapabilityMode::GlobalV1 {
-        if raw.starts_with("local_splat_sog_") {
-            return Some((raw.to_string(), "local_splat_sog"));
-        }
-        if raw.starts_with("refined_manifest") {
-            return Some((raw.to_string(), "refined_manifest_json"));
-        }
+    if raw.starts_with("refined_manifest")
+        && matches!(mode, CapabilityMode::ColmapV1 | CapabilityMode::GlobalV1)
+    {
+        return Some((raw.to_string(), "refined_manifest_json"));
+    }
+    if mode == CapabilityMode::GlobalV1 && raw.starts_with("local_splat_sog_") {
+        return Some((raw.to_string(), "local_splat_sog"));
     }
     None
 }
 
-fn reject_data_ids_envelope(bytes: &[u8], cid: &str) -> Result<()> {
+fn is_refined_manifest_input(name: Option<&str>, data_type: Option<&str>) -> bool {
+    data_type == Some("refined_manifest_json")
+        || name.is_some_and(|n| n.starts_with("refined_manifest"))
+}
+
+/// Reject bare `dataIDs` job envelopes. Refined manifests also carry `dataIDs` (DMT
+/// `/splatter/colmap/v1` sends the manifest URL); those are accepted and expanded.
+fn reject_non_manifest_data_ids_envelope(
+    bytes: &[u8],
+    cid: &str,
+    name: Option<&str>,
+    data_type: Option<&str>,
+) -> Result<()> {
     let Ok(parsed) = serde_json::from_slice::<Value>(bytes) else {
         return Ok(());
     };
-    if parsed.get("dataIDs").is_some() {
-        return Err(anyhow!(
-            "input {} uses a dataIDs JSON envelope; pass domain-data URLs or artifact names in inputs_cids instead",
-            cid
-        ));
+    if parsed.get("dataIDs").is_none() {
+        return Ok(());
     }
-    Ok(())
+    if is_refined_manifest_input(name, data_type) {
+        return Ok(());
+    }
+    Err(anyhow!(
+        "input {} uses a dataIDs JSON envelope; pass a refined_manifest URL/name (colmap) or domain-data URLs / artifact names in inputs_cids",
+        cid
+    ))
+}
+
+fn scan_id_from_manifest_data_id_entry(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() || trimmed.contains("://") || Uuid::parse_str(trimmed).is_ok() {
+        return None;
+    }
+    if let Some(rest) = trimmed.strip_prefix("refined_scan_") {
+        return Some(normalize_scan_id(rest));
+    }
+    if let Some(rest) = trimmed.strip_prefix("dmt_recording_") {
+        return Some(normalize_scan_id(rest.trim_end_matches(".mp4")));
+    }
+    Some(normalize_scan_id(trimmed))
+}
+
+fn scan_ids_from_manifest_data_ids(parsed: &Value) -> Vec<String> {
+    let Some(arr) = parsed.get("dataIDs").and_then(|v| v.as_array()) else {
+        return Vec::new();
+    };
+    let mut ids = HashSet::new();
+    for entry in arr {
+        let Some(raw) = entry.as_str() else {
+            continue;
+        };
+        if let Some(scan_id) = scan_id_from_manifest_data_id_entry(raw) {
+            ids.insert(scan_id);
+        }
+    }
+    let mut out: Vec<String> = ids.into_iter().collect();
+    out.sort();
+    out
+}
+
+async fn download_colmap_recordings_for_scans(
+    scan_ids: &[String],
+    job_root: &Path,
+    task: &TaskContext,
+    io: &TaskIo,
+) -> Result<DownloadSummary> {
+    let mut summary = DownloadSummary::default();
+    let mut downloaded: HashSet<String> = HashSet::new();
+
+    for scan_id in scan_ids {
+        if !downloaded.insert(scan_id.clone()) {
+            continue;
+        }
+        ensure_task_not_cancelled(task, "resolving derived recording metadata")?;
+        let query_name = format!("dmt_recording_{scan_id}");
+        match io.find(&query_name, Some("dmt_recording_mp4")).await {
+            Ok(meta_list) => {
+                let Some(meta) = meta_list.into_iter().next() else {
+                    warn!(
+                        scan_id = %scan_id,
+                        name = %query_name,
+                        "derived dmt recording metadata empty"
+                    );
+                    continue;
+                };
+                let dest = job_root
+                    .join("datasets")
+                    .join(scan_id)
+                    .join("Frames.mp4");
+                let bytes = download_item(io, meta.id, meta.size, &dest).await?;
+                summary.datasets_downloaded += 1;
+                summary.scan_ids.push(scan_id.clone());
+                let _ = task.log_event(json!({
+                    "level": "info",
+                    "message": "downloaded derived dmt recording",
+                    "data_id": meta.id.to_string(),
+                    "scan_id": scan_id,
+                    "bytes": bytes,
+                    "dest": dest.display().to_string(),
+                }));
+            }
+            Err(err) => {
+                warn!(
+                    scan_id = %scan_id,
+                    name = %query_name,
+                    error = %err,
+                    "failed to resolve derived dmt recording metadata"
+                );
+            }
+        }
+    }
+
+    Ok(summary)
+}
+
+async fn expand_colmap_inputs_from_manifest_bytes(
+    bytes: &[u8],
+    job_root: &Path,
+    task: &TaskContext,
+    io: &TaskIo,
+) -> Result<DownloadSummary> {
+    let parsed: Value = serde_json::from_slice(bytes)
+        .context("parse refined_manifest JSON for colmap dataIDs")?;
+    let scan_ids = scan_ids_from_manifest_data_ids(&parsed);
+    if scan_ids.is_empty() {
+        warn!("refined_manifest has no usable dataIDs entries for colmap recordings");
+        return Ok(DownloadSummary::default());
+    }
+    download_colmap_recordings_for_scans(&scan_ids, job_root, task, io).await
 }
 
 fn merge_download_summary(into: &mut DownloadSummary, from: DownloadSummary) {
@@ -209,6 +323,7 @@ async fn stage_materialized_url_input(
     materialized: &Materialized,
     job_root: &Path,
     task: &TaskContext,
+    io: &TaskIo,
 ) -> Result<DownloadSummary> {
     let mut summary = DownloadSummary::default();
     let name = materialized.name.as_deref();
@@ -218,13 +333,23 @@ async fn stage_materialized_url_input(
     let bytes = tokio::fs::read(&materialized.path)
         .await
         .with_context(|| format!("read materialized path {}", materialized.path.display()))?;
-    reject_data_ids_envelope(&bytes, cid)?;
+    reject_non_manifest_data_ids_envelope(&bytes, cid, name, data_type)?;
+
+    let is_refined_manifest = is_refined_manifest_input(name, data_type);
+
+    // DMT Rendering Job: inputs_cids = [refined_manifest URL]. Expand dataIDs → recordings.
+    if mode == CapabilityMode::ColmapV1 && is_refined_manifest {
+        info!(name = ?name, "expanding colmap inputs from refined_manifest url");
+        let _ = task.log_event(json!({
+            "level": "info",
+            "message": "expanding colmap inputs from refined_manifest url",
+            "name": name,
+            "cid": cid,
+        }));
+        return expand_colmap_inputs_from_manifest_bytes(&bytes, job_root, task, io).await;
+    }
 
     if mode == CapabilityMode::GlobalV1 {
-        let parsed: Option<Value> = serde_json::from_slice(&bytes).ok();
-        let is_refined_manifest = data_type == Some("refined_manifest_json")
-            || name.is_some_and(|n| n.starts_with("refined_manifest"))
-            || parsed.as_ref().is_some_and(|v| v.get("alignedScans").is_some());
         if is_refined_manifest {
             let dest = job_root
                 .join("refined")
@@ -288,8 +413,7 @@ async fn stage_materialized_url_input(
                     .unwrap_or_else(|| "scan".to_string())
             })
         };
-        let Some(dest) = dataset_dest_path(job_root, &scan_id, name, data_type, &materialized.path)
-        else {
+        let Some(dest) = dataset_dest_path(job_root, &scan_id, name, data_type) else {
             return Err(anyhow!("cannot stage dataset url input {}", cid));
         };
         if let Some(parent) = dest.parent() {
@@ -460,9 +584,10 @@ impl NodeRunner for SplatterRunner {
                     refined_suffix = extract_refined_suffix(materialized.name.as_deref());
                 }
 
-                let partial = stage_materialized_url_input(mode, &materialized, &job_root, task)
-                    .await
-                    .with_context(|| format!("stage url input {}", cid))?;
+                let partial =
+                    stage_materialized_url_input(mode, &materialized, &job_root, task, io)
+                        .await
+                        .with_context(|| format!("stage url input {}", cid))?;
                 merge_download_summary(&mut summary, partial);
             }
 
@@ -471,35 +596,21 @@ impl NodeRunner for SplatterRunner {
                     .await?;
             }
 
-        // Keep backward compatibility for /splatter/colmap/v1: historically this
-        // capability proceeded without this strict preflight and relied on pipeline-level
-        // validation. Retain fail-fast checks for staged local/global capabilities.
-        if mode != CapabilityMode::ColmapV1 {
-            let mut datasets_present = summary.datasets_downloaded > 0;
-            if !datasets_present {
-                if let Ok(mut rd) = tokio::fs::read_dir(&datasets_dir).await {
-                    if rd.next_entry().await?.is_some() {
-                        datasets_present = true;
-                    }
+        let mut datasets_present = summary.datasets_downloaded > 0;
+        if !datasets_present {
+            if let Ok(mut rd) = tokio::fs::read_dir(&datasets_dir).await {
+                if rd.next_entry().await?.is_some() {
+                    datasets_present = true;
                 }
             }
-            if !datasets_present {
-                return Err(anyhow!(
-                    "no datasets downloaded; expected at least one scan input"
-                ));
-            }
         }
-        // Run the Python pipeline and upload the splat.
-        let job_id_str = spec.job_id.map(|j| j.to_string()).unwrap_or_else(|| {
-            // Fallback to task id so the script always has a value.
-            spec.id.to_string()
-        });
+        if !datasets_present {
+            return Err(anyhow!(
+                "no datasets downloaded; expected at least one scan input"
+            ));
+        }
 
         // Resolve scripts at runtime so container layout is flexible.
-        let exe_dir = env::current_exe()?
-            .parent()
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("."));
         let pipeline_py = PathBuf::from("splatter_pipeline.py");
         let project_root = pipeline_py
             .parent()
@@ -526,17 +637,9 @@ impl NodeRunner for SplatterRunner {
                 "--iterations".to_string(),
                 splatter_iterations(),
             ];
-            if bool_env("SPLATTER_REUSE_TRAINED", false) {
-                args.push("--reuse_trained".to_string());
-            }
             if !summary.scan_ids.is_empty() {
                 args.push("--scan_ids".to_string());
                 args.push(summary.scan_ids.join(","));
-            }
-            if !bool_env("SPLATTER_CONVERT_TO_SPLAT", convert_to_splat_default(mode)) {
-                args.push("--no_convert_to_splat".to_string());
-            } else {
-                args.push("--convert_to_splat".to_string());
             }
             if !bool_env("SPLATTER_PARTITION", true) {
                 args.push("--no_partition".to_string());
@@ -847,6 +950,27 @@ async fn materialize_inputs_for_mode(
         let data_type = m.data_type.as_str();
         match mode {
             CapabilityMode::ColmapV1 | CapabilityMode::LocalV1 => {
+                if mode == CapabilityMode::ColmapV1
+                    && (data_type == "refined_manifest_json"
+                        || m.name.starts_with("refined_manifest"))
+                {
+                    let dest = job_root
+                        .join("refined")
+                        .join("global")
+                        .join("refined_manifest.json");
+                    download_item(io, m.id, m.size, &dest).await?;
+                    let bytes = tokio::fs::read(&dest)
+                        .await
+                        .with_context(|| format!("read staged refined_manifest {}", dest.display()))?;
+                    let partial =
+                        expand_colmap_inputs_from_manifest_bytes(&bytes, job_root, task, io)
+                            .await?;
+                    summary.datasets_downloaded += partial.datasets_downloaded;
+                    for scan_id in partial.scan_ids {
+                        scan_set.insert(scan_id);
+                    }
+                    continue;
+                }
                 if is_recording_input(data_type, &m.name) {
                     let scan_id = normalize_scan_id(m.name.trim_start_matches("dmt_recording_"));
                     let dest = job_root.join("datasets").join(&scan_id).join("Frames.mp4");
@@ -969,7 +1093,6 @@ fn dataset_dest_path(
     scan_id: &str,
     name: Option<&str>,
     data_type: Option<&str>,
-    input_path: &Path,
 ) -> Option<PathBuf> {
     let name = name.filter(|n| !n.is_empty()).unwrap_or("");
     let data_type = data_type.unwrap_or("");
@@ -979,20 +1102,7 @@ fn dataset_dest_path(
     if is_refined_scan_input(data_type, name) {
         return Some(job_root.join("datasets").join(scan_id).join("RefinedScan.zip"));
     }
-
-    // Infer from file extension when name/type are unavailable.
-    let ext = input_path
-        .extension()
-        .and_then(|s| s.to_str())
-        .unwrap_or("")
-        .to_ascii_lowercase();
-    if ext == "mp4" {
-        Some(job_root.join("datasets").join(scan_id).join("Frames.mp4"))
-    } else if ext == "zip" {
-        Some(job_root.join("datasets").join(scan_id).join("RefinedScan.zip"))
-    } else {
-        None
-    }
+    None
 }
 
 async fn materialize_colmap_binaries(
@@ -1197,16 +1307,6 @@ mod product_contract_tests {
     use super::*;
 
     #[test]
-    fn colmap_keeps_splat_defaults_local_global_sog_only() {
-        assert!(
-            convert_to_splat_default(CapabilityMode::ColmapV1),
-            "colmap defaults to .splat product path"
-        );
-        assert!(!convert_to_splat_default(CapabilityMode::LocalV1));
-        assert!(!convert_to_splat_default(CapabilityMode::GlobalV1));
-    }
-
-    #[test]
     fn input_name_query_maps_artifact_names_by_mode() {
         assert_eq!(
             input_name_query(CapabilityMode::LocalV1, "dmt_recording_abc.mp4"),
@@ -1224,6 +1324,49 @@ mod product_contract_tests {
             input_name_query(CapabilityMode::GlobalV1, "refined_manifest_2026-01-01"),
             Some(("refined_manifest_2026-01-01".to_string(), "refined_manifest_json"))
         );
+        assert_eq!(
+            input_name_query(CapabilityMode::ColmapV1, "refined_manifest_2026-01-01"),
+            Some(("refined_manifest_2026-01-01".to_string(), "refined_manifest_json"))
+        );
         assert!(input_name_query(CapabilityMode::LocalV1, "local_splat_sog_x").is_none());
+        assert!(input_name_query(CapabilityMode::LocalV1, "refined_manifest_x").is_none());
+    }
+
+    #[test]
+    fn colmap_manifest_data_ids_derive_scan_ids() {
+        let parsed = json!({
+            "dataIDs": [
+                "refined_scan_2026-09-10_11-41-36",
+                "dmt_recording_2026-09-10_11-42-19.mp4",
+                "https://example.com/ignore",
+                "45914b14-f6b6-47f0-8212-f3d19a594e0a"
+            ]
+        });
+        assert!(is_refined_manifest_input(
+            Some("refined_manifest_2026-01-01"),
+            Some("refined_manifest_json")
+        ));
+        assert!(!is_refined_manifest_input(None, None));
+        assert_eq!(
+            scan_ids_from_manifest_data_ids(&parsed),
+            vec![
+                "2026-09-10_11-41-36".to_string(),
+                "2026-09-10_11-42-19".to_string(),
+            ]
+        );
+        assert!(reject_non_manifest_data_ids_envelope(
+            br#"{"dataIDs":["refined_scan_x"]}"#,
+            "cid",
+            None,
+            None
+        )
+        .is_err());
+        assert!(reject_non_manifest_data_ids_envelope(
+            serde_json::to_vec(&parsed).unwrap().as_slice(),
+            "cid",
+            Some("refined_manifest_2026-01-01"),
+            Some("refined_manifest_json")
+        )
+        .is_ok());
     }
 }

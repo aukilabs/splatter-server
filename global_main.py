@@ -81,21 +81,6 @@ def partition(lod_ply_path: Path, partition_size: float, base_name: str) -> list
     return partition_paths
 
 
-def convert_to_splat(ply_paths: list[Path], skip_combined: bool = True,
-                     combined_ply_path: Optional[Path] = None):
-    """Convert PLY files to .splat format."""
-    print("[global] Converting to .splat format...")
-    
-    for ply_path in ply_paths:
-        if skip_combined and combined_ply_path and ply_path == combined_ply_path:
-            continue  # skip combined file (too big, OOM risk)
-        if ply_path.suffix == ".ply":
-            try:
-                convert_splat.convert_ply_to_splat(ply_path)
-            except Exception as e:
-                print(f"[global] Error converting {ply_path.name}: {e}")
-
-
 def convert_to_sog(ply_paths: list[Path], skip_combined: bool = True,
                    combined_ply_path: Optional[Path] = None):
     """Convert PLY files to .sog format."""
@@ -111,24 +96,10 @@ def convert_to_sog(ply_paths: list[Path], skip_combined: bool = True,
                 print(f"[global] Error converting {ply_path.name} to SOG: {e}")
 
 
-def convert_aligned_scans(job_root: Path, to_splat: bool = True, to_sog: bool = False):
-    """Convert aligned scan splats to .splat and/or .sog format."""
-    aligned_dir = job_root / "refined" / "global" / "aligned_splats"
-    if not aligned_dir.exists():
-        return
-    
-    aligned_plys = [p for p in aligned_dir.iterdir() if p.suffix == ".ply"]
-    if to_splat:
-        convert_to_splat(aligned_plys, skip_combined=False)
-    if to_sog:
-        convert_to_sog(aligned_plys, skip_combined=False)
-
-
 def main(job_root: Path, scan_ids: list[str],
          base_filename: str = "splat_30000",
          use_filtered: bool = True,
-         do_partition: bool = True, partition_size: float = 10.0,
-         do_convert_splat: bool = False) -> dict:
+         do_partition: bool = True, partition_size: float = 10.0) -> dict:
     """
     Run global splat processing pipeline.
     
@@ -148,10 +119,7 @@ def main(job_root: Path, scan_ids: list[str],
         partition_paths.extend(partition(coarse_ply, partition_size, "coarse"))
         partition_paths.extend(partition(fine_ply, partition_size, "fine"))
 
-    # Step 4: Convert partition formats (SOG always; .splat optional)
-    if do_convert_splat:
-        convert_to_splat(partition_paths, skip_combined=False)
-
+    # Step 4: Convert partitions to SOG
     convert_to_sog(partition_paths, skip_combined=False)
     
     elapsed = time.time() - start_time
@@ -175,12 +143,6 @@ if __name__ == "__main__":
     parser.add_argument("--use-filtered", action="store_true", default=True)
     parser.add_argument("--no-partition", action="store_true", default=False)
     parser.add_argument("--partition-size", type=float, default=10.0)
-    parser.add_argument(
-        "--convert-splat",
-        action="store_true",
-        default=False,
-        help="Also write .splat alongside product SOG partitions",
-    )
 
     args = parser.parse_args()
     
@@ -197,6 +159,5 @@ if __name__ == "__main__":
         use_filtered=args.use_filtered,
         do_partition=not args.no_partition,
         partition_size=args.partition_size,
-        do_convert_splat=args.convert_splat,
     )
 

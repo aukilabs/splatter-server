@@ -12,7 +12,7 @@ Guidance for AI agents working in `aukilabs/splatter-server`.
 
 - `server/rust/` is the Rust compute-node workspace.
   - `server/rust/bin/src/main.rs` starts the HTTP server, loads node config from environment, registers the Splatter runner capabilities, and runs the compute node through `node-host`.
-  - `server/rust/runner/src/lib.rs` implements `/splatter/colmap/v1`, `/splatter/local/v1`, and `/splatter/global/v1`: materializes input CIDs, fetches DMT recordings and refined artifacts through `node-host` task IO, runs the Python pipeline, and uploads product outputs (see `CAPABILITIES.md`).
+  - `server/rust/runner/src/lib.rs` implements `/splatter/colmap/v1`, `/splatter/local/v1`, and `/splatter/global/v1`: materializes input CIDs, fetches DMT recordings and refined artifacts through `node-host` task IO, runs the Python pipeline, and uploads node capability outputs (see `docs/compute-capability.md`).
   - `server/rust/Makefile` wraps local Rust commands for run, check, fmt, clippy, test, and ci.
 - Root-level Python scripts drive the training/export pipeline:
   - `splatter_pipeline.py` is the capability entrypoint (`colmap_v1_single_splat`, `local_only`, `global_only`).

@@ -28,13 +28,6 @@ from combine_splats import PRE_ROTATION_MATRIX, transform_splat_data
 from artifact_naming import rename_for_domain_upload
 
 
-def _bool_env(name: str, default: bool) -> bool:
-    v = os.environ.get(name)
-    if v is None:
-        return default
-    return v.strip().lower() in {"1", "true", "yes", "on"}
-
-
 def mp4_to_frames(mp4_path: Path, frames_path: Path, filename_prefix: str = "") -> int:
     capture = cv2.VideoCapture(str(mp4_path))
     frame_count = 0
@@ -76,40 +69,30 @@ def _is_colmap_model(path: Path) -> bool:
     return (path / "cameras.bin").is_file() or (path / "cameras.txt").is_file()
 
 
-def _normalize_refined_sfm_layout(scan_dir: Path) -> Path:
-    """Match reconstruction-global: prefer scan/sfm/; lift flat legacy zip contents into sfm/."""
-    sfm_dir = scan_dir / "sfm"
-    if _is_colmap_model(sfm_dir):
-        return sfm_dir
-    if _is_colmap_model(scan_dir):
-        sfm_dir.mkdir(parents=True, exist_ok=True)
-        for item in scan_dir.iterdir():
-            if not item.is_file():
-                continue
-            if item.suffix.lower() not in {".bin", ".csv", ".txt"}:
-                continue
-            dest = sfm_dir / item.name
-            if not dest.exists():
-                shutil.move(str(item), str(dest))
-        return sfm_dir
-    return sfm_dir
-
-
 def ensure_sfm_for_scan(job_root: Path, scan_id: str) -> Path:
-    """Unpack RefinedScan.zip into refined/local/<scan>/ (entries: sfm/, carve/, …)."""
+    """Unpack RefinedScan.zip into refined/local/<scan>/sfm/."""
     scan_dir = job_root / "refined" / "local" / scan_id
-    sfm_dir = _normalize_refined_sfm_layout(scan_dir)
+    sfm_dir = scan_dir / "sfm"
     if _is_colmap_model(sfm_dir):
         return sfm_dir
 
     zip_path = job_root / "datasets" / scan_id / "RefinedScan.zip"
     if not zip_path.exists():
         raise FileNotFoundError(f"missing sfm and RefinedScan.zip for scan {scan_id}")
+
     scan_dir.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(str(zip_path), "r") as zf:
-        zf.extractall(scan_dir)
+        for name in zf.namelist():
+            if name.endswith("/") or name.endswith("\\"):
+                continue
+            normalized = name.replace("\\", "/")
+            if "/" in normalized:
+                raise ValueError(
+                    f"unexpected path in RefinedScan.zip for scan {scan_id}: {name!r}"
+                )
+        sfm_dir.mkdir(parents=True, exist_ok=True)
+        zf.extractall(sfm_dir)
 
-    sfm_dir = _normalize_refined_sfm_layout(scan_dir)
     if not _is_colmap_model(sfm_dir):
         raise FileNotFoundError(
             f"RefinedScan.zip for scan {scan_id} has no COLMAP cameras.bin under {sfm_dir}"
@@ -237,8 +220,6 @@ def run_local_only(
     job_root: Path,
     scan_ids: list[str],
     iterations: int,
-    reuse_trained: bool,
-    convert_to_splat: bool,
 ) -> dict:
     if not scan_ids:
         scan_ids = discover_scan_ids(job_root)
@@ -255,8 +236,6 @@ def run_local_only(
         job_root=job_root,
         scan_ids=scan_ids,
         iterations=iterations,
-        reuse_trained=reuse_trained,
-        do_convert_splat=convert_to_splat,
     )
 
     _progress("postprocessing", 90, "staging outputs")
@@ -284,7 +263,6 @@ def run_global_only(
     use_filtered: bool,
     partition: bool,
     partition_size: float,
-    convert_to_splat: bool,
     manifest_timestamp: str | None = None,
 ) -> dict:
     if not scan_ids:
@@ -300,7 +278,6 @@ def run_global_only(
         use_filtered=use_filtered,
         do_partition=partition,
         partition_size=partition_size,
-        do_convert_splat=convert_to_splat,
     )
 
     _progress("postprocessing", 80, "staging outputs")
@@ -344,7 +321,6 @@ def main() -> None:
     parser.add_argument("--job_root_path", type=Path, required=True)
     parser.add_argument("--scan_ids", type=str, default="")
     parser.add_argument("--iterations", type=int, default=30000)
-    parser.add_argument("--reuse_trained", action="store_true", default=False)
     parser.add_argument("--use_filtered", action="store_true", default=True)
     parser.add_argument("--no_use_filtered", action="store_true", default=False)
     parser.add_argument("--partition", action="store_true", default=True)
@@ -354,9 +330,7 @@ def main() -> None:
         type=float,
         default=float(os.environ.get("SPLATTER_PARTITION_SIZE", "10")),
     )
-    parser.add_argument("--convert_to_splat", action="store_true", default=False)
-    parser.add_argument("--no_convert_to_splat", action="store_true", default=False)
-    # Older image runners still pass these; SOG is always on for local/global.
+    # Older local runners may still pass these; SOG is always on for local/global.
     parser.add_argument("--convert_to_sog", action="store_true", default=False, help=argparse.SUPPRESS)
     parser.add_argument("--no_convert_to_sog", action="store_true", default=False, help=argparse.SUPPRESS)
     parser.add_argument(
@@ -374,34 +348,14 @@ def main() -> None:
     if args.mode == "colmap_v1_single_splat":
         run_colmap_single_splat(job_root, args.iterations)
     elif args.mode == "local_only":
-        convert_flags = {
-            f
-            for f in sys.argv
-            if f in {"--convert_to_splat", "--no_convert_to_splat"}
-        }
-        if convert_flags:
-            convert_to_splat = args.convert_to_splat and not args.no_convert_to_splat
-        else:
-            convert_to_splat = _bool_env("SPLATTER_CONVERT_TO_SPLAT", False)
         run_local_only(
             job_root=job_root,
             scan_ids=scan_ids,
             iterations=args.iterations,
-            reuse_trained=args.reuse_trained,
-            convert_to_splat=convert_to_splat,
         )
     else:
         use_filtered = args.use_filtered and not args.no_use_filtered
         do_partition = args.partition and not args.no_partition
-        convert_flags = {
-            f
-            for f in sys.argv
-            if f in {"--convert_to_splat", "--no_convert_to_splat"}
-        }
-        if convert_flags:
-            convert_to_splat = args.convert_to_splat and not args.no_convert_to_splat
-        else:
-            convert_to_splat = _bool_env("SPLATTER_CONVERT_TO_SPLAT", False)
         run_global_only(
             job_root=job_root,
             scan_ids=scan_ids,
@@ -409,7 +363,6 @@ def main() -> None:
             use_filtered=use_filtered,
             partition=do_partition,
             partition_size=args.partition_size,
-            convert_to_splat=convert_to_splat,
             manifest_timestamp=args.manifest_timestamp,
         )
 

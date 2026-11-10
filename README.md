@@ -8,6 +8,7 @@ For more information about the reconstruction and rendering pipeline, please ref
 ## Documentation
 - [Minimum Requirements](docs/minimum-requirements.md)
 - [Deployment](docs/deployment.md)
+- [Compute Capability](docs/compute-capability.md)
 - [Contributing](CONTRIBUTING.md)
 
 ## License

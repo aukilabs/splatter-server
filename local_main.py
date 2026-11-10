@@ -124,8 +124,6 @@ def scan_main(
     job_root: Path,
     scan_id: str,
     iterations: int = 30000,
-    reuse_trained: bool = False,
-    do_convert_splat: bool = False,
 ) -> None:
     start_time = time.time()
 
@@ -133,12 +131,8 @@ def scan_main(
     splat_dir = job_root / "refined" / "local" / scan_id / "splat"
     images_dir = job_root / "refined" / "local" / scan_id / "dense" / "images"
     colmap_dir = job_root / "refined" / "local" / scan_id / "dense" / "sparse"
-    if reuse_trained and (splat_dir / f"{splat_filename}.ply").exists():
-        print("Splat reuse enabled, skip ahead to filtering")
-    else:
-        preprocessing.main(job_root, scan_id)
-
-        train_splat(colmap_dir, splat_dir, images_dir, iterations=iterations)
+    preprocessing.main(job_root, scan_id)
+    train_splat(colmap_dir, splat_dir, images_dir, iterations=iterations)
 
     filtered_ply = splat_dir / f"{splat_filename}.filtered.ply"
     filter_args = argparse.Namespace(
@@ -161,8 +155,6 @@ def scan_main(
         raise FileNotFoundError(f"Filtered PLY was not produced: {filtered_ply}")
 
     convert_splat.convert_ply_to_sog(filtered_ply)
-    if do_convert_splat:
-        convert_splat.convert_ply_to_splat(filtered_ply)
 
     end_time = time.time()
     print(f"Local splatting DONE in {end_time - start_time} seconds: {scan_id}")
@@ -172,16 +164,12 @@ def main(
     job_root: Path,
     scan_ids: list[str],
     iterations: int = 30000,
-    reuse_trained: bool = False,
-    do_convert_splat: bool = False,
 ) -> None:
     for scan_id in scan_ids:
         scan_main(
             job_root,
             scan_id,
             iterations=iterations,
-            reuse_trained=reuse_trained,
-            do_convert_splat=do_convert_splat,
         )
 
 
@@ -191,13 +179,6 @@ if __name__ == "__main__":
     parser.add_argument("--scan-id", type=str, default=None)
     parser.add_argument("--all-scan-ids", action="store_true", default=False)
     parser.add_argument("--iterations", type=int, default=30000)
-    parser.add_argument("--reuse-trained", action="store_true", default=False)
-    parser.add_argument(
-        "--convert-splat",
-        action="store_true",
-        default=False,
-        help="Also write .splat alongside product SOG",
-    )
 
     args = parser.parse_args()
     print(f"args: {args}")
@@ -213,6 +194,4 @@ if __name__ == "__main__":
         job_root=args.job_root,
         scan_ids=scan_ids,
         iterations=args.iterations,
-        reuse_trained=args.reuse_trained,
-        do_convert_splat=args.convert_splat,
     )
