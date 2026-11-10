@@ -4,11 +4,11 @@ The splatter node is available on [Docker Hub](https://hub.docker.com/r/aukilabs
 
 ## Initial Setup
 
-1. First check that your NVIDIA driver and CUDA toolkit meet the requirements in the [Minimum Requirements](minimum-requirements.md) and update as needed:
+1. First check that your NVIDIA driver meets the requirements in the [Minimum Requirements](minimum-requirements.md) and update as needed:
    ```shell
    nvidia-smi
    ```
-   This should output information about your GPU. If not, please double check that your installed CUDA and driver versions are correct, and restart your computer.
+   This should output information about your GPU. If not, please double check that your installed driver version is correct, and restart your computer.
 
 2. Ensure outbound HTTPS access to DDS/DMS endpoints from this host.
 
@@ -82,9 +82,9 @@ You can also pin a specific release tag, for example `aukilabs/splatter-server:v
    ```
    This should show your GPU and driver information.
 
-   Verify that torch detects your GPU:
+   Verify that the LichtFeld Studio binary is present in the image:
    ```shell
-   docker exec <container_id> python3 -c "import torch; print(torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'CUDA not found')"
+   docker exec <container_id> test -x /app/LichtFeld-Studio/build/LichtFeld-Studio && echo "LichtFeld Studio OK"
    ```
    
    If not, please double-check your setup, or see **Troubleshooting**.
@@ -112,9 +112,8 @@ Here are some common issues you may encounter, with suggested fixes:
 - **Symptom:** Server starts but jobs fail, GPU not utilised, `CUDA not found`, or similar.
 - **Fixes:**  
   - Ensure you started the Docker container with `--gpus all`.
-  - Check your driver and CUDA toolkit versions against [Minimum Requirements](minimum-requirements.md).
+  - Check your NVIDIA driver version against [Minimum Requirements](minimum-requirements.md).
   - Run `nvidia-smi` on host to confirm your GPU is visible.
-  - Run `nvcc --version` to confirm your CUDA toolkit is installed, and with the correct version.
   - Restart your computer and try again.
 
 ### Wrong GPU used

@@ -31,42 +31,46 @@ By contributing, you agree that your contributions will be licensed under the sa
 - **Docker:** From the repo root, `docker build -t splatter-server .` then run with `--env-file .env`.
 
 ## Run Trainer
+
+Product capabilities are driven by `splatter_pipeline.py` (see `CAPABILITIES.md` for contracts):
+
 ```bash
-python3 run.py \
---domain_id {domain_id}
---job_id {job_id} \
---job_root_path {path/to/job/root} \
---log_level {log level}
+# Legacy single-scan .splat upload path
+python3 splatter_pipeline.py --mode colmap_v1_single_splat --job_root_path {path/to/job/root}
+
+# Per-scan local SOG
+python3 splatter_pipeline.py --mode local_only --job_root_path {path/to/job/root} --scan_ids {scan_id}
+
+# Global merge + 10 m SOG partitions
+python3 splatter_pipeline.py --mode global_only --job_root_path {path/to/job/root} \
+  --scan_ids {scan_id,...} --manifest_timestamp {YYYY-MM-DD_HH-MM-SS}
 ```
 
 ## Input Files
 ```bash
-# Input Files
+# Input Files (local / colmap)
 {job_root_path}
 ├── datasets
-│   └── {dataset}
-│       └── Frames.mp4
-├── refined
-│   └── global
-│       └── refined_sfm_combined
-│           ├── cameras.bin
-│           ├── images.bin
-│           └── points3D.bin
+│   └── {scan_id}
+│       ├── Frames.mp4          # or extracted Frames/
+│       └── RefinedScan.zip     # sfm/ COLMAP model inside
+└── refined
+    └── global
+        └── refined_manifest.json   # global mode only
 ```
+
 ## Output Files
 ```bash
-# Output Files
+# Output Files (product paths)
 {job_root_path}
-├── Frames
-│   ├── {images}
-│   └── ...
 ├── refined
-│   ├── nerfstudio-data
-│   │   └── {converted nerfstudio data from colmap}
-│   └── splatter
-│       ├── splat.ply
-│       ├── splat_rot.ply
-│       ├── splat_rot.splat # this is what needs to be uploaded to dmt
-│       └── splatfacto
-│           └── {splat torch model}
+│   ├── splatter
+│   │   └── splat_rot.splat              # /splatter/colmap/v1 upload
+│   ├── local
+│   │   └── {scan_id}/splat/
+│   │       └── splat_{iters}.filtered.sog   # /splatter/local/v1
+│   └── global
+│       ├── coarse_partition_*.sog
+│       └── fine_partition_*.sog         # staged as splat_partition_* for /splatter/global/v1
+└── output/                              # staged domain-upload names
 ```

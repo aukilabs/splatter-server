@@ -12,12 +12,12 @@ Guidance for AI agents working in `aukilabs/splatter-server`.
 
 - `server/rust/` is the Rust compute-node workspace.
   - `server/rust/bin/src/main.rs` starts the HTTP server, loads node config from environment, registers the Splatter runner capabilities, and runs the compute node through `node-host`.
-  - `server/rust/runner/src/lib.rs` implements the `/splatter/colmap/v1` runner, materializes input CIDs, fetches DMT recordings and COLMAP artifacts through `node-host` task IO, runs the Python pipeline, and uploads the resulting splat as `splat_data`.
+  - `server/rust/runner/src/lib.rs` implements `/splatter/colmap/v1`, `/splatter/local/v1`, and `/splatter/global/v1`: materializes input CIDs, fetches DMT recordings and refined artifacts through `node-host` task IO, runs the Python pipeline, and uploads product outputs (see `CAPABILITIES.md`).
   - `server/rust/Makefile` wraps local Rust commands for run, check, fmt, clippy, test, and ci.
 - Root-level Python scripts drive the training/export pipeline:
-  - `run.py` orchestrates `ns-process-data`, `ns-train`, `ns-export`, `rotate_ply.py`, and `convert_ply2splat.py`.
-  - `extract_mp4.py`, `convert_ply2splat.py`, and `rotate_ply.py` are pipeline helpers used by `run.py` and the Docker image.
-- `Dockerfile` builds the Rust `splatter-bin` binary, then runs it in a `nerfstudio` runtime image with the Python pipeline under `/app` and task workspaces under `/app/tasks`.
+  - `splatter_pipeline.py` is the capability entrypoint (`colmap_v1_single_splat`, `local_only`, `global_only`).
+  - `local_main.py` / `global_main.py` / `preprocessing.py` train and merge with LichtFeld Studio; helpers include `convert_splat.py`, `filter_splats.py`, `partition_splat.py`, `crop_aabb.py`, and `black_pixel_masks.py`.
+- `Dockerfile` is multi-stage (Rust build → LichtFeld build → lean CUDA runtime). The image ships `splatter-bin`, the LichtFeld Studio binary, and the Python pipeline under `/app`, with task workspaces under `/app/tasks`.
 - `charts/splatter-server/` contains the Helm chart and environment values consumed by deployment automation.
 - `docs/` contains operator-facing deployment and minimum-requirements docs.
 
