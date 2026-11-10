@@ -9,9 +9,17 @@ machine registration, authentication, DMS leases and heartbeats.
    registration secret, secp256k1 private key, etc).
 2) From this directory run `make run` (or `cargo run -p splatter-bin`). The
    binary loads `.env` automatically and starts the HTTP server on
-   `0.0.0.0:8080` (`GET /health`).
+   `0.0.0.0:8080` (`GET /health`). Local builds default
+   `SPLATTER_VERSION=0.0.0-local` (override the env var for a release-like
+   semver; leading `v` is stripped). CI uses `0.0.0+<gitsha>`; release tags
+   pass the tag name into Docker/`build.rs` the same way reconstruction uses
+   `RECONSTRUCTION_VERSION`.
 3) Use `scripts/curl-create-hello-job.sh` to enqueue a demo job
    once the node has registered with DDS/DMS.
+
+Private Auki SDK crates need GitHub auth for `cargo`/`docker build` (same as
+reconstruction): configure `git` URL rewriting with a checkout token, or pass
+`--secret id=github_token` when building the image.
 
 Packages:
 

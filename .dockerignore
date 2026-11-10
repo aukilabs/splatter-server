@@ -1,0 +1,25 @@
+# Keep secrets and local junk out of the Docker build context.
+.git
+.cursor
+.env
+.env.*
+.env-*
+!**/.env.example
+server/rust/.env
+server/rust/.env.*
+_splatter_env.json
+*.pem
+tasks/
+tmp/
+plans/
+*.ply
+*.sog
+*.splat
+*.log
+*.vhdx
+__pycache__/
+**/__pycache__/
+.venv/
+venv/
+**/romav2.pt
+agent-transcripts/
