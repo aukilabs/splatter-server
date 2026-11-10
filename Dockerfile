@@ -159,6 +159,10 @@ COPY config/lichtfeld_optimization_params.json /app/config/
 
 COPY --from=rust-build /app/server/rust/target/release/splatter-bin /app/splatter
 
+COPY docker/entrypoint.sh /app/entrypoint.sh
+RUN chmod 755 /app/entrypoint.sh \
+    && sed -i "s/\r$//" /app/entrypoint.sh
+
 # Paths above match code defaults (LFS under /app/LichtFeld-Studio, helper under /app/scripts).
 ENV TASKS_ROOT=/app/tasks
 
@@ -169,4 +173,4 @@ RUN useradd -u "$USER_UID" -o -m user || true \
 USER $USER_UID:$USER_GID
 
 EXPOSE 8080
-ENTRYPOINT ["/app/splatter"]
+ENTRYPOINT ["/app/entrypoint.sh"]
