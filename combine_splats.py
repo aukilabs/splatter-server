@@ -16,7 +16,7 @@ Usage with job-root (recommended):
     This will:
     - Discover scan IDs from job_root/datasets/
     - Read COLMAP Sim3 transforms from job_root/refined/global/refined_manifest.json
-      (scanAlignmentTransforms / localToDomain — released reconstruction naming)
+      (scanAlignmentTransforms / localToGlobalColmap)
     - Load splats from job_root/refined/local/<scan_id>/splat/splat_30000.ply
     - Write output to job_root/refined/global/combined_splat.ply
 
@@ -28,13 +28,13 @@ Usage with explicit files:
         --output combined.ply
 
 Transform JSON format (refined_manifest.json style):
-Transforms are Sim3 as written by released reconstruction (v0.4+).
+Transforms are COLMAP-frame Sim3.
 Quaternion dict keys x,y,z,w are manifest storage format only (xyzw → wxyz internally).
 
 {
     "scanAlignmentTransforms": {
         "scan_id": {
-            "localToDomain": {
+            "localToGlobalColmap": {
                 "scale": "1.0",
                 "position": {"x": "0", "y": "0", "z": "0"},
                 "rotation": {"x": "0", "y": "0", "z": "0", "w": "1"}
@@ -158,7 +158,7 @@ def load_transform(transform_data: dict, apply_pre_rotation: bool = True) -> tup
     Combined: R_final = R_align @ R_pre
 
     Supports two formats:
-    1. Manifest format (localToDomain from refined_manifest.json):
+    1. Manifest format (localToGlobalColmap from refined_manifest.json):
        {"scale": "1.0", "position": {"x": ..., "y": ..., "z": ...},
         "rotation": {"x": ..., "y": ..., "z": ..., "w": ...}}
     2. Simple format:
@@ -294,7 +294,6 @@ def discover_scans_and_transforms(job_root: Path, scan_ids: Optional[list] = Non
     with open(manifest_path, "r") as f:
         manifest = json.load(f)
 
-    # Released reconstruction writes scanAlignmentTransforms → localToDomain.
     # Missing alignment must fail the job — identity would silently place local
     # splats wrong in domain space.
     aligned_scans = manifest.get("scanAlignmentTransforms")
@@ -312,10 +311,12 @@ def discover_scans_and_transforms(job_root: Path, scan_ids: Optional[list] = Non
             )
 
         entry = aligned_scans[scan_id]
-        transform_data = entry.get("localToDomain") if isinstance(entry, dict) else None
+        transform_data = (
+            entry.get("localToGlobalColmap") if isinstance(entry, dict) else None
+        )
         if transform_data is None:
             raise ValueError(
-                f"No 'localToDomain' for scan '{scan_id}' in {manifest_path}"
+                f"No 'localToGlobalColmap' for scan '{scan_id}' in {manifest_path}"
             )
 
         result[scan_id] = {"transform": transform_data}
@@ -416,14 +417,13 @@ def combine_splats_explicit(args: argparse.Namespace) -> None:
     with open(args.transforms, "r") as f:
         transforms = json.load(f)
     
-    # Handle released refined_manifest style: scanAlignmentTransforms → localToDomain
     if "scanAlignmentTransforms" in transforms and isinstance(
         transforms["scanAlignmentTransforms"], dict
     ):
         transforms = {
-            scan_id: data.get("localToDomain")
+            scan_id: data.get("localToGlobalColmap")
             for scan_id, data in transforms["scanAlignmentTransforms"].items()
-            if isinstance(data, dict) and data.get("localToDomain") is not None
+            if isinstance(data, dict) and data.get("localToGlobalColmap") is not None
         }
     
     all_vertices = []
