@@ -1,6 +1,6 @@
 //! Child-process lifetime for pipeline subprocesses.
 //!
-//! Pipelines fan out into grandchildren (e.g. `ns-train`, COLMAP) that keep
+//! Pipelines fan out into grandchildren (e.g. LichtFeld Studio, COLMAP) that keep
 //! the GPU busy. Killing only the direct child orphans them, so the child runs
 //! as the leader of its own process group and cancellation signals the group.
 use std::time::Duration;

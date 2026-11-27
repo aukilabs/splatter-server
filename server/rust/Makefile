@@ -1,5 +1,8 @@
 CARGO ?= cargo
 PACKAGE := splatter-bin
+# Same default as reconstruction's RECONSTRUCTION_VERSION / bin build.rs.
+SPLATTER_VERSION ?= 0.0.0-local
+export SPLATTER_VERSION
 
 .PHONY: run check fmt clippy test ci
 

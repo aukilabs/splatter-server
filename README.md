@@ -8,6 +8,7 @@ For more information about the reconstruction and rendering pipeline, please ref
 ## Documentation
 - [Minimum Requirements](docs/minimum-requirements.md)
 - [Deployment](docs/deployment.md)
+- [Compute Capability](docs/compute-capability.md)
 - [Contributing](CONTRIBUTING.md)
 
 ## License
@@ -21,7 +22,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for how to report issues, open PRs, and r
 ## Acknowledgments
 
 This project builds upon the work of many excellent open-source projects, including
-[nerfstudio](https://github.com/nerfstudio-project/nerfstudio), [ply2splat](https://github.com/bastikohn/ply2splat), [PyTorch](https://pytorch.org),
+[LichtFeld Studio](https://github.com/MrNeRF/LichtFeld-Studio), [ply2splat](https://github.com/bastikohn/ply2splat),
 [OpenCV](https://opencv.org), [Open3D](https://www.open3d.org), and others.
 
 We thank their authors and contributors for making this work possible.  

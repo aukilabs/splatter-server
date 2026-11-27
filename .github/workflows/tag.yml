@@ -7,7 +7,8 @@ concurrency:
 on:
   push:
     tags:
-      - "v*"
+      - "v[0-9]+.[0-9]+.[0-9]+"
+      - "v[0-9]+.[0-9]+.[0-9]+-*"
 
 jobs:
   build-and-push:
@@ -29,20 +30,21 @@ jobs:
           username: ${{ secrets.DOCKER_USERNAME }}
           password: ${{ secrets.DOCKER_PASSWORD }}
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Build and push (linux/amd64 only)
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          file: Dockerfile
-          build-args: |
-            SPLATTER_VERSION=${{ github.ref_name }}
-          push: true
-          platforms: linux/amd64
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-          tags: |
-            aukilabs/splatter-server:latest
-            aukilabs/splatter-server:${{ github.ref_name }}
+      - name: Docker build and push
+        env:
+          DOCKER_BUILDKIT: "1"
+          GLOBAL_AUKI_CHECKOUT_TOKEN: ${{ secrets.GLOBAL_AUKI_CHECKOUT_TOKEN }}
+        run: |
+          if [ -z "${GLOBAL_AUKI_CHECKOUT_TOKEN}" ]; then
+            echo "::error::GLOBAL_AUKI_CHECKOUT_TOKEN is empty. Add this repo to that org secret's repository access."
+            exit 1
+          fi
+          docker build \
+            --secret id=github_token,env=GLOBAL_AUKI_CHECKOUT_TOKEN \
+            --build-arg "SPLATTER_VERSION=${{ github.ref_name }}" \
+            -t "aukilabs/splatter-server:latest" \
+            -t "aukilabs/splatter-server:${{ github.ref_name }}" \
+            -f Dockerfile \
+            .
+          docker push "aukilabs/splatter-server:latest"
+          docker push "aukilabs/splatter-server:${{ github.ref_name }}"
