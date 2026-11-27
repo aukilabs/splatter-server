@@ -3,8 +3,9 @@ Global splat processing: combine, partition, and convert splats.
 
 This module handles post-training steps:
 1. Combine individual scan splats into a single file
-2. Partition the combined splat into tiles
-3. Convert PLY files to .splat and/or .sog formats
+2. Rotate the combined splat into the Domain map orientation
+3. Partition the combined splat into tiles
+4. Convert PLY files to .splat and/or .sog formats
 """
 
 from pathlib import Path
@@ -16,6 +17,11 @@ import combine_splats
 import filter_splats
 import partition_splat
 import convert_splat
+from plyfile import PlyData, PlyElement
+from splat_transform_math import rotation_matrix_z
+
+
+POST_COMBINE_ROTATION_Z_DEG = -90.0
 
 
 def combine(job_root: Path, scan_ids: list[str], use_filtered: bool = True,
@@ -66,6 +72,22 @@ def split_coarse_fine(combined_ply_path: Path) -> tuple[Path, Path]:
     return coarse_ply, fine_ply
 
 
+def rotate_combined_splat_z(combined_ply_path: Path) -> None:
+    """Rotate the merged scene once, keeping each scan's alignment unchanged."""
+    ply = PlyData.read(str(combined_ply_path))
+    if "vertex" not in ply:
+        raise ValueError(f"No vertex element in combined splat: {combined_ply_path}")
+
+    vertices = combine_splats.transform_splat_data(
+        ply["vertex"].data,
+        scale=1.0,
+        R=rotation_matrix_z(POST_COMBINE_ROTATION_Z_DEG),
+        t=[0.0, 0.0, 0.0],
+    )
+    output_element = PlyElement.describe(vertices, "vertex")
+    PlyData([output_element], text=False).write(str(combined_ply_path))
+
+
 def partition(lod_ply_path: Path, partition_size: float, base_name: str) -> list[Path]:
     """Partition a LOD splat into tiles."""
     print(f"[global] Partitioning {base_name} with size {partition_size}m...")
@@ -110,16 +132,19 @@ def main(job_root: Path, scan_ids: list[str],
     # Step 1: Combine splats
     combined_ply_path = combine(job_root, scan_ids, use_filtered, base_filename)
 
-    # Step 2: Split into coarse/fine LODs
+    # Step 2: Align the completed scene to the Domain map before partitioning.
+    rotate_combined_splat_z(combined_ply_path)
+
+    # Step 3: Split into coarse/fine LODs
     coarse_ply, fine_ply = split_coarse_fine(combined_ply_path)
 
-    # Step 3: Partition each LOD if requested
+    # Step 4: Partition each LOD if requested
     partition_paths: list[Path] = []
     if do_partition:
         partition_paths.extend(partition(coarse_ply, partition_size, "coarse"))
         partition_paths.extend(partition(fine_ply, partition_size, "fine"))
 
-    # Step 4: Convert partitions to SOG
+    # Step 5: Convert partitions to SOG
     convert_to_sog(partition_paths, skip_combined=False)
     
     elapsed = time.time() - start_time

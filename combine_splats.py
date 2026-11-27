@@ -399,7 +399,7 @@ def combine_splats_from_job_root(args: argparse.Namespace) -> None:
         vert = ply["vertex"].data
         print(f"  - {len(vert)} gaussians")
         
-        scale, R, t = load_transform(transform_data)
+        scale, R, t = load_transform(transform_data, apply_pre_rotation=False)
         print(f"  - t SIM3: scale={scale:.6f}, t=[{t[0]:.3f}, {t[1]:.3f}, {t[2]:.3f}]")
         
         transformed_vert = transform_splat_data(vert, scale, R, t)
@@ -457,7 +457,7 @@ def combine_splats_explicit(args: argparse.Namespace) -> None:
         vert = ply["vertex"].data
         print(f"  - {len(vert)} gaussians")
         
-        scale, R, t = load_transform(transform_data)
+        scale, R, t = load_transform(transform_data, apply_pre_rotation=False)
         print(f"  - Applying SIM3: scale={scale:.6f}, t=[{t[0]:.3f}, {t[1]:.3f}, {t[2]:.3f}]")
         
         transformed_vert = transform_splat_data(vert, scale, R, t)
